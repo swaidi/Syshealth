@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build SysHealth (app + command line)",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": ["-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
+                     "--icon", "assets/syshealth.ico", "--add-data", "assets:assets",
+                     "--name", "SysHealth", "main.py"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": [],
+            "dependsOn": "Build command-line tool",
+            "dependsOrder": "sequence"
+        },
+        {
+            "label": "Build command-line tool",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": ["-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--console",
+                     "--icon", "assets/syshealth.ico", "--name", "SysHealthCLI", "cli.py"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Install dependencies",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": ["-m", "pip", "install", "-r", "requirements.txt"],
+            "problemMatcher": []
+        }
+    ]
+}

@@ -1,0 +1,5 @@
+psutil>=5.9
+Send2Trash>=1.8
+cryptography>=42
+darkdetect>=0.8
+pyinstaller>=6.0
