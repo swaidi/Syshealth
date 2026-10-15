@@ -17,9 +17,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -281,21 +283,77 @@ def download(release: Release, log: LogFn = None, cancel: Optional[threading.Eve
     return staged
 
 
-def apply(staged: list[tuple[str, str]], old_version: str, new_version: str) -> None:
-    """Replace the program files and start the new version. The caller closes the app straight after."""
+def apply(staged: list[tuple[str, str]], old_version: str, new_version: str) -> str:
+    """Replace the program files and start the new version. The caller closes the app straight after.
+    Returns how the files were replaced. Raises UpdateError when they could not be replaced; nothing is
+    closed or changed in that case."""
+    exe = os.path.abspath(sys.executable)
+    try:
+        _swap_in_place(staged)
+    except OSError as exc:
+        if not IS_WINDOWS:
+            raise UpdateError(f"SysHealth could not replace its files ({exc}).") from exc
+        _apply_windows_helper(staged, exe)  # fallback: swap after SysHealth has closed
+        method = "replaced after closing (helper)"
+    else:
+        _start_new_version(exe)
+        method = "replaced in place"
     settings.set_value("update_from", old_version)
     settings.set_value("update_to", new_version)
-    exe = os.path.abspath(sys.executable)
-    if IS_WINDOWS:
-        _apply_windows(staged, exe)
-    else:
+    return method
+
+
+def _swap_in_place(staged: list[tuple[str, str]]) -> None:
+    """Rename the running program aside and put the new one in its place. Windows allows renaming (not
+    overwriting) a running .exe, and Linux allows replacing it. Rolls everything back on any failure."""
+    moved: list[tuple[str, str]] = []
+    try:
         for new, target in staged:
-            os.replace(new, target)  # Linux allows replacing a running program file
-        subprocess.Popen([exe], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            backup = target + ".old"
+            if os.path.exists(backup):
+                try:
+                    os.remove(backup)
+                except OSError:  # an older leftover still in use: pick another name
+                    backup = f"{target}.{int(time.time())}.old"
+            if os.path.exists(target):
+                os.rename(target, backup)
+                moved.append((target, backup))
+            shutil.copy2(new, target)  # copy, not move: the download folder may be on another drive
+            if not IS_WINDOWS:
+                os.chmod(target, 0o755)
+    except OSError:
+        for target, backup in reversed(moved):
+            try:
+                if os.path.exists(target):
+                    os.remove(target)
+                os.rename(backup, target)
+            except OSError:
+                pass
+        raise
 
 
-def _apply_windows(staged: list[tuple[str, str]], exe: str) -> None:
-    """A running .exe cannot be overwritten, so a small hidden script swaps the files after SysHealth closes."""
+def _clean_env() -> dict:
+    """Environment for starting another packaged program: without the settings that point at this copy's
+    temporary files, so the new version unpacks and starts on its own."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("_PYI") or k.startswith("_MEIPASS") or k in ("TCL_LIBRARY", "TK_LIBRARY"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
+def _start_new_version(exe: str) -> None:
+    kwargs = dict(cwd=os.path.dirname(exe), env=_clean_env(), close_fds=True,
+                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if IS_WINDOWS:
+        kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([exe], **kwargs)
+
+
+def _apply_windows_helper(staged: list[tuple[str, str]], exe: str) -> None:
+    """Fallback when the files are locked: a small script swaps them after SysHealth closes. SysHealth only
+    closes once the script has confirmed it is running, so a blocked script can never leave it closed."""
     import psutil
     pids = [os.getpid()]
     try:  # the one-file build runs as two processes; wait for the launcher too
@@ -305,38 +363,58 @@ def _apply_windows(staged: list[tuple[str, str]], exe: str) -> None:
     except (psutil.Error, OSError):
         pass
 
-    def q(s: str) -> str:
-        return "'" + s.replace("'", "''") + "'"
-    pairs = ",".join(f"@({q(n)},{q(t)})" for n, t in staged)
+    def q(text: str) -> str:
+        return "'" + text.replace("'", "''") + "'"
+    pairs = "\n".join(f"$pairs += ,@({q(n)}, {q(t)})" for n, t in staged)  # ',' keeps each pair intact
     logfile = os.path.join(app_data_dir("updates"), "update.log")
-    script = f"""
-$ErrorActionPreference = "Stop"
+    try:
+        os.remove(logfile)
+    except OSError:
+        pass
+    script = f"""$ErrorActionPreference = "Stop"
 $log = {q(logfile)}
 function Log($m) {{ Add-Content -ErrorAction SilentlyContinue -Path $log -Value ("[" + (Get-Date -Format s) + "] " + $m) }}
-Log "Waiting for SysHealth to close"
+Log "Helper started; waiting for SysHealth to close"
 Wait-Process -Id {",".join(map(str, pids))} -Timeout 60 -ErrorAction SilentlyContinue
-foreach ($p in @({pairs})) {{
+$pairs = @()
+{pairs}
+foreach ($p in $pairs) {{
     $new = $p[0]; $target = $p[1]; $backup = $target + ".old"; $done = $false
     for ($i = 0; $i -lt 40 -and -not $done; $i++) {{
         try {{
             if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $backup -Force }}
             if (Test-Path -LiteralPath $target) {{ Move-Item -LiteralPath $target -Destination $backup -Force }}
-            try {{ Move-Item -LiteralPath $new -Destination $target -Force; $done = $true; Log "Replaced $target" }}
+            try {{ Copy-Item -LiteralPath $new -Destination $target -Force; $done = $true; Log "Replaced $target" }}
             catch {{ if (Test-Path -LiteralPath $backup) {{ Move-Item -LiteralPath $backup -Destination $target -Force }}; throw }}
         }} catch {{ Start-Sleep -Milliseconds 500 }}
     }}
     if (-not $done) {{ Log "Could not replace $target; the previous version was kept" }}
 }}
+$env:PYINSTALLER_RESET_ENVIRONMENT = "1"
 Start-Process -FilePath {q(exe)} -WorkingDirectory {q(os.path.dirname(exe))}
+Log "Started SysHealth"
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """
     path = os.path.join(app_data_dir("updates"), "apply_update.ps1")
     with open(path, "w", encoding="utf-8-sig") as fh:
         fh.write(script)
-    subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                      "-WindowStyle", "Hidden", "-File", path],
-                     creationflags=CREATE_NO_WINDOW | 0x00000008,  # DETACHED_PROCESS
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    try:
+        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                          "-WindowStyle", "Hidden", "-File", path], env=_clean_env(),
+                         creationflags=CREATE_NO_WINDOW | 0x00000200, close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise UpdateError("Windows did not allow the update helper to start.") from exc
+    deadline = time.time() + 15
+    while time.time() < deadline:  # wait for the helper's first log line before letting SysHealth close
+        try:
+            with open(logfile, encoding="utf-8", errors="replace") as fh:
+                if "Helper started" in fh.read():
+                    return
+        except OSError:
+            pass
+        time.sleep(0.3)
+    raise UpdateError("The update helper did not start. Security software may have blocked it.")
 
 
 def finish_pending(current: str = VERSION) -> Optional[str]:
@@ -354,6 +432,7 @@ def finish_pending(current: str = VERSION) -> Optional[str]:
         return None
     settings.set_value("update_to", "")
     settings.set_value("update_from", "")
+    shutil.rmtree(app_data_dir("updates", target), ignore_errors=True)
     if parse_version(target) == parse_version(current):
         return f"SysHealth was updated from {previous} to {current}."
     return f"The update to {target} did not complete; SysHealth {current} is still installed."

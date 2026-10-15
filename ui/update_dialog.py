@@ -117,8 +117,17 @@ class UpdateDialog(tk.Toplevel):
                                           "SysHealth will now close, install it and reopen. This takes a few seconds."):
                 app.log("Update postponed. It will be offered again.")
                 return
-            state.record_action("SysHealth update", f"Installing version {release.version}", f"from {VERSION}")
-            self_update.apply(result, VERSION, release.version)
+            try:
+                method = self_update.apply(result, VERSION, release.version)
+            except (self_update.UpdateError, OSError) as exc:
+                app.log(f"Update not installed: {exc}")
+                if messagebox.askyesno("SysHealth update", f"SysHealth could not install the update.\n\n{exc}\n\n"
+                                       "Nothing was changed. Open the release page to download it manually?",
+                                       icon="warning"):
+                    webbrowser.open(release.page)
+                return
+            state.record_action("SysHealth update", f"Installing version {release.version}",
+                                f"from {VERSION}; files {method}")
             app.destroy()
 
         app.run_task(f"Downloading SysHealth {release.version}", work, done)
