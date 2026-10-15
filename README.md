@@ -16,7 +16,7 @@ Credit: A.T.Grep
 | Page | What it does |
 |---|---|
 | Large Files | Folder size drill-down with share bars, plus the largest files. Move files to the Recycle Bin. |
-| Duplicate Files | Match by name or by size within the same type, with optional SHA-256 confirmation. Keeps at least one copy per group. |
+| Duplicate Files | Match by name or by size within the same type, with optional SHA-256 confirmation. Keeps at least one copy per group. Skips program and project folders (virtual environments, node_modules, .git) and library files by default. Export to Excel for review before deleting. |
 | Cleanup | Junk files (temp, Windows Update cache, thumbnails, crash dumps, browser caches, Recycle Bin), old downloads, empty folders, and drive optimization (TRIM / defragment). |
 | Long Paths | Finds paths too long for Office (218), Windows (259) or OneDrive (400). Proposes the fewest renames; supervised or automatic; undo supported. |
 

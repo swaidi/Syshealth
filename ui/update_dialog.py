@@ -27,10 +27,12 @@ class UpdateDialog(tk.Toplevel):
         p = app.palette
         self.title("SysHealth update")
         self.configure(background=p["app"])
-        _center(self, app, 620, 520)
+        _center(self, app, 620, min(520, self.winfo_screenheight() - 120))
         self.minsize(520, 440)
         self.transient(app)
 
+        btns = ttk.Frame(self, padding=(18, 8, 18, 18))
+        btns.pack(side=tk.BOTTOM, fill=tk.X)  # first, so the buttons never get pushed off screen
         body = ttk.Frame(self, padding=18)
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text="A new version of SysHealth is available", style="PageTitle.TLabel").pack(anchor=tk.W)
@@ -68,8 +70,6 @@ class UpdateDialog(tk.Toplevel):
                         command=lambda: settings.set_value("update_check_startup", self.auto.get())).pack(
             anchor=tk.W, pady=(8, 0))
 
-        btns = ttk.Frame(self, padding=(18, 0, 18, 18))
-        btns.pack(fill=tk.X)
         ttk.Button(btns, text="Skip this version", command=self.skip).pack(side=tk.LEFT)
         ttk.Button(btns, text="Update now" if self.self_install else "Open download page", style="Accent.TButton",
                    command=self.update).pack(side=tk.RIGHT)

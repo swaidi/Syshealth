@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .platform_utils import IS_WINDOWS, Cancelled
+from .platform_utils import IS_WINDOWS, Cancelled, is_virtual_dir, list_dir
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
@@ -61,36 +61,34 @@ def analyze(roots: list[str], top_files: int = 200, cancel: Optional[threading.E
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
             current = stack.pop()
-            try:
-                it = os.scandir(current)
-            except OSError:
+            entries, complete = list_dir(current)
+            if not complete:
                 rep.errors += 1
-                continue
             local_size, local_count, subdirs = 0, 0, []
-            with it:
-                for e in it:
-                    try:
-                        if e.is_symlink():
-                            continue
-                        if IS_WINDOWS:
-                            st = e.stat(follow_symlinks=False)
-                            if getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
-                                continue
-                        if e.is_dir(follow_symlinks=False):
-                            subdirs.append(e.path)
-                            continue
-                        if not e.is_file(follow_symlinks=False):
-                            continue
+            for e in entries:
+                try:
+                    if e.is_symlink():
+                        continue
+                    if IS_WINDOWS:
                         st = e.stat(follow_symlinks=False)
-                        size = st.st_size
-                        local_size += size
-                        local_count += 1
-                        if len(heap) < top_files:
-                            heapq.heappush(heap, (size, e.path, st.st_mtime))
-                        elif size > heap[0][0]:
-                            heapq.heapreplace(heap, (size, e.path, st.st_mtime))
-                    except OSError:
-                        rep.errors += 1
+                        if getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                            continue
+                    if e.is_dir(follow_symlinks=False):
+                        if not is_virtual_dir(e.path):  # /proc, /sys, /dev, /run and similar
+                            subdirs.append(e.path)
+                        continue
+                    if not e.is_file(follow_symlinks=False):
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    size = st.st_size
+                    local_size += size
+                    local_count += 1
+                    if len(heap) < top_files:
+                        heapq.heappush(heap, (size, e.path, st.st_mtime))
+                    elif size > heap[0][0]:
+                        heapq.heapreplace(heap, (size, e.path, st.st_mtime))
+                except OSError:
+                    rep.errors += 1
             rep.children[current] = subdirs
             for d in subdirs:
                 rep.dir_size.setdefault(d, 0)

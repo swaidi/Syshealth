@@ -26,10 +26,14 @@ class FeedbackDialog(tk.Toplevel):
         p = app.palette
         self.title("Send feedback")
         self.configure(background=p["app"])
-        self.geometry("760x640")
-        self.minsize(640, 520)
+        height = min(640, self.winfo_screenheight() - 120)  # fits small and scaled screens
+        self.geometry(f"760x{height}")
+        self.minsize(600, min(480, height))
         self.transient(app)
 
+        # Buttons are packed first, at the bottom, so they stay visible however small the window is
+        btns = ttk.Frame(self, padding=(16, 8, 16, 16))
+        btns.pack(side=tk.BOTTOM, fill=tk.X)
         body = ttk.Frame(self, padding=16)
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text="Send feedback", style="PageTitle.TLabel").pack(anchor=tk.W)
@@ -69,8 +73,6 @@ class FeedbackDialog(tk.Toplevel):
                   style="Muted.TLabel").pack(anchor=tk.W, pady=(0, 4))
         self.preview = self._text(body, height=10, mono=True)
 
-        btns = ttk.Frame(self, padding=(16, 0, 16, 16))
-        btns.pack(fill=tk.X)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
         ttk.Button(btns, text="Send by email", style="Accent.TButton", command=self.send_email).pack(side=tk.RIGHT)
         ttk.Button(btns, text="Save as file…", command=self.save).pack(side=tk.RIGHT, padx=6)

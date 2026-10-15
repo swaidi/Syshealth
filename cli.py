@@ -129,8 +129,14 @@ def cmd_large(args) -> int:
 
 
 def cmd_duplicates(args) -> int:
-    files = index_files(args.paths, max(1, args.min_kb * 1024), cancel=CANCEL, progress=Out.quiet)
-    groups = find_duplicates(files, "name" if args.by == "name" else "size_ext", not args.no_verify, CANCEL, Out.quiet)
+    mode = "name" if args.by == "name" else "size_ext"
+    files = index_files(args.paths, max(1, args.min_kb * 1024), cancel=CANCEL, progress=Out.quiet,
+                        include_program=args.include_program)
+    groups = find_duplicates(files, mode, not args.no_verify, CANCEL, Out.quiet)
+    if args.export:
+        from core.duplicates import export_xlsx
+        rows = export_xlsx(groups, args.export, args.paths, mode, not args.no_verify)
+        Out.quiet(f"Excel report saved: {args.export} ({rows:,} files).")
     wasted = sum(g.wasted for g in groups)
     state.publish("duplicates", "WARN" if wasted > 1024 ** 3 else ("INFO" if groups else "OK"),
                   f"{human_size(wasted)} reclaimable" if groups else "No duplicates", f"{len(groups)} groups")
@@ -489,6 +495,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--by", choices=["size", "name"], default="size")
     sp.add_argument("--no-verify", action="store_true", help="skip content (hash) verification")
     sp.add_argument("--min-kb", type=int, default=100)
+    sp.add_argument("--export", metavar="FILE.xlsx", help="save the results to an Excel workbook for review")
+    sp.add_argument("--include-program", action="store_true",
+                    help="also scan program and project folders (virtual environments, node_modules, .git...)")
     sp = add("longpaths", cmd_longpaths, "find and fix long paths")
     sp.add_argument("paths", nargs="*")
     sp.add_argument("--limit", type=int, default=218)

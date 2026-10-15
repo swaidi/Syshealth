@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .platform_utils import IS_WINDOWS, Cancelled, app_data_dir, norm, protected_roots
+from .platform_utils import IS_WINDOWS, Cancelled, is_virtual_dir, list_dir, app_data_dir, norm, protected_roots
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -79,33 +79,29 @@ def scan(roots: list[str], limit: int, cancel: Optional[threading.Event] = None,
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
             current = stack.pop()
-            try:
-                it = os.scandir(current)
-            except OSError:
-                continue
-            with it:
-                for entry in it:
-                    try:
-                        if entry.is_symlink():
-                            continue
-                        plain = to_plain(entry.path)
-                        is_dir = entry.is_dir(follow_symlinks=False)
-                        if IS_WINDOWS:
-                            attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
-                            if attrs & FILE_ATTRIBUTE_REPARSE_POINT:
-                                continue
-                        if is_dir:
-                            if norm(plain) in protected or entry.name.lower() in (
-                                    "$recycle.bin", "system volume information"):
-                                continue
-                            stack.append(entry.path)
-                        checked += 1
-                        if len(plain) > limit:
-                            found.append(LongItem(plain, root_plain, is_dir))
-                        if progress and checked % 5000 == 0:
-                            progress(f"Checked {checked:,} items… {to_plain(current)}")
-                    except OSError:
+            entries, _complete = list_dir(current)
+            for entry in entries:
+                try:
+                    if entry.is_symlink():
                         continue
+                    plain = to_plain(entry.path)
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if IS_WINDOWS:
+                        attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+                        if attrs & FILE_ATTRIBUTE_REPARSE_POINT:
+                            continue
+                    if is_dir:
+                        if norm(plain) in protected or is_virtual_dir(plain) or entry.name.lower() in (
+                                "$recycle.bin", "system volume information"):
+                            continue
+                        stack.append(entry.path)
+                    checked += 1
+                    if len(plain) > limit:
+                        found.append(LongItem(plain, root_plain, is_dir))
+                    if progress and checked % 5000 == 0:
+                        progress(f"Checked {checked:,} items… {to_plain(current)}")
+                except OSError:
+                    continue
     return found, checked
 
 

@@ -25,6 +25,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         ("{cmd} large D:\\ --top 30", "Largest files and folders on drive D:."),
         ("{cmd} duplicates C:\\Users\\Me\\Documents", "Find duplicates (same size and type, identical content)."),
         ("{cmd} duplicates PATH --by name", "Find files with the same name."),
+        ("{cmd} duplicates PATH --export dups.xlsx", "Save duplicates to an Excel file to review before deleting."),
         ("{cmd} longpaths PATH --limit 218", "List paths too long for Office (218) and proposed renames."),
         ("{cmd} longpaths PATH --fix --yes", "Apply the proposed renames automatically (undo: longpaths --undo)."),
     ]),

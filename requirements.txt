@@ -2,4 +2,5 @@ psutil>=5.9
 Send2Trash>=1.8
 cryptography>=42
 darkdetect>=0.8
+openpyxl>=3.1
 pyinstaller>=6.0

@@ -28,6 +28,7 @@ Run from a terminal. From source, replace `SysHealthCLI` with `python cli.py`.
 | `SysHealthCLI large D:\ --top 30` | Largest files and folders on drive D:. |
 | `SysHealthCLI duplicates C:\Users\Me\Documents` | Find duplicates (same size and type, identical content). |
 | `SysHealthCLI duplicates PATH --by name` | Find files with the same name. |
+| `SysHealthCLI duplicates PATH --export dups.xlsx` | Save duplicates to an Excel file to review before deleting. |
 | `SysHealthCLI longpaths PATH --limit 218` | List paths too long for Office (218) and proposed renames. |
 | `SysHealthCLI longpaths PATH --fix --yes` | Apply the proposed renames automatically (undo: longpaths --undo). |
 

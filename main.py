@@ -15,10 +15,10 @@ from send2trash import send2trash
 from core import disk_health, network, system_health
 from core.checks import FAIL, INFO, OK, WARN, Fix, execute_fix
 from core import long_paths
-from core.duplicates import find_duplicates, index_files
+from core.duplicates import export_xlsx as export_duplicates_xlsx, find_duplicates, in_program_folder, index_files
 from core.malware import Allowlist, ClamAV, Defender, quick_scan_locations, scan_unknown_files
 from core.platform_utils import (APP_NAME, IS_WINDOWS, Cancelled, NeedsAdmin, app_data_dir, human_size,
-                                 is_admin, is_protected, open_location,
+                                 is_admin, is_protected, open_location, open_url_or_file,
                                  relaunch_as_admin)
 from core import security, self_update, state, settings as settings_store
 from core.version import VERSION
@@ -630,7 +630,7 @@ class DuplicatesTab(ttk.Frame):
         self.files: dict[str, object] = {}
         self.group_of: dict[str, str] = {}
         app.page_header(self, "Duplicate Files", "Find copies by name or by size within the same file type. "
-                        "System folders are always excluded.")
+                        "System folders are always excluded; program and project folders are skipped by default.")
 
         opts = card(self, 14)
         opts.pack(fill=tk.X)
@@ -655,6 +655,10 @@ class DuplicatesTab(ttk.Frame):
                         style="Switch.TCheckbutton").grid(row=2, column=2, sticky="w", pady=(12, 0), padx=(0, 20))
         ttk.Checkbutton(opts, text="Include app data", variable=self.appdata,
                         style="Switch.TCheckbutton").grid(row=2, column=3, sticky="w", pady=(12, 0), padx=(0, 20))
+        self.program = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Include program folders (advanced)", variable=self.program,
+                        style="Switch.TCheckbutton", command=self._warn_program).grid(
+            row=2, column=4, sticky="w", pady=(12, 0))
 
         size_row = ttk.Frame(opts)
         size_row.grid(row=3, column=1, columnspan=2, sticky="w", pady=(12, 0))
@@ -666,7 +670,11 @@ class DuplicatesTab(ttk.Frame):
         opts.columnconfigure(4, weight=1)
 
         self.summary = tk.StringVar(value="Select locations and click 'Scan for duplicates'.")
-        ttk.Label(self, textvariable=self.summary, style="Section.TLabel").pack(fill=tk.X, pady=(12, 6))
+        head = ttk.Frame(self)
+        head.pack(fill=tk.X, pady=(12, 6))
+        ttk.Label(head, textvariable=self.summary, style="Section.TLabel").pack(side=tk.LEFT)
+        self.sel_var = tk.StringVar(value="")
+        ttk.Label(head, textvariable=self.sel_var, style="Section.TLabel").pack(side=tk.RIGHT)
 
         self.tree = CheckTree(self, app, [("size", "Size", 100), ("modified", "Modified", 140),
                                           ("folder", "Folder", 520)], "Group / File (click to select)")
@@ -680,10 +688,9 @@ class DuplicatesTab(ttk.Frame):
             side=tk.LEFT, padx=6)
         ttk.Button(btns, text="Clear selection", command=self.clear_selection).pack(side=tk.LEFT)
         ttk.Button(btns, text="Open file location", command=self._open_selected).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Export to Excel…", command=self.export_excel).pack(side=tk.LEFT)
         ttk.Button(btns, text="Move selected to Recycle Bin", style="Danger.TButton",
                    command=self.delete_selected).pack(side=tk.RIGHT)
-        self.sel_var = tk.StringVar(value="")
-        MutedLabel(btns, textvariable=self.sel_var, style="Muted.TLabel").pack(side=tk.RIGHT, padx=10)
         self.tree.tree.bind("<ButtonRelease-1>", lambda e: self.update_selection_label(), add=True)
 
     def scan(self) -> None:
@@ -697,7 +704,8 @@ class DuplicatesTab(ttk.Frame):
             messagebox.showerror(APP_NAME, "Minimum size must be a number.")
             return
         mode, verify = self.mode.get(), self.verify.get()
-        hidden, appdata = self.hidden.get(), self.appdata.get()
+        hidden, appdata, program = self.hidden.get(), self.appdata.get(), self.program.get()
+        self.last_scan = {"roots": roots, "mode": mode, "verify": verify}
 
         def progress(msg: str) -> None:
             self.app.set_status(msg)
@@ -705,7 +713,7 @@ class DuplicatesTab(ttk.Frame):
                 self.app.log(msg)
 
         def work(cancel):
-            files = index_files(roots, max(min_size, 1), hidden, appdata, cancel, progress)
+            files = index_files(roots, max(min_size, 1), hidden, appdata, cancel, progress, program)
             return find_duplicates(files, mode, verify, cancel, progress)
 
         self.tree.clear()
@@ -715,9 +723,10 @@ class DuplicatesTab(ttk.Frame):
         self.tree.clear()
         self.files.clear()
         self.group_of.clear()
+        self.groups = groups
         for i, g in enumerate(groups[:self.MAX_GROUPS], 1):
             gid = self.tree.add_group(f"Group {i}: {g.label} — {len(g.files)} files",
-                                      (human_size(g.total), f"reclaim {human_size(g.wasted)}", ""))
+                                      (human_size(g.total), "", f"Reclaimable: {human_size(g.wasted)}"))
             for f in g.files:
                 iid = self.tree.add_item(gid, f.name, (human_size(f.size),
                                                       dt.datetime.fromtimestamp(f.mtime).strftime("%Y-%m-%d %H:%M"),
@@ -754,11 +763,36 @@ class DuplicatesTab(ttk.Frame):
 
     def update_selection_label(self) -> None:
         sel = [self.files[i] for i in self.tree.checked if i in self.files]
-        total = getattr(self, "total_wasted", 0)
-        text = f"Selected: {len(sel):,} files, {human_size(sum(f.size for f in sel))}" if sel else ""
-        if total:
-            text += ("  /  " if text else "") + f"Total reclaimable: {human_size(total)}"
-        self.sel_var.set(text)
+        # the total reclaimable space is in the summary line above the list
+        self.sel_var.set(f"Selected: {len(sel):,} files, {human_size(sum(f.size for f in sel))}" if sel else "")
+
+    def _warn_program(self) -> None:
+        if self.program.get():
+            messagebox.showwarning(APP_NAME, "Program folders include Python environments, Node.js modules, Git "
+                                   "data, Wine, Steam and Flatpak, plus program library files (.dll, .so).\n\n"
+                                   "Their files often look like duplicates, but each program needs its own copy. "
+                                   "Deleting them can stop programs or projects from working.\n\n"
+                                   "Use this only to review space, for example with 'Export to Excel'.")
+
+    def export_excel(self) -> None:
+        groups = getattr(self, "groups", None)
+        if not groups:
+            messagebox.showinfo(APP_NAME, "Run a duplicate scan first.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel workbook", "*.xlsx")],
+                                            initialfile=f"SysHealth_duplicates_{dt.datetime.now():%Y%m%d_%H%M}.xlsx")
+        if not path:
+            return
+        scan = getattr(self, "last_scan", {"roots": [], "mode": self.mode.get(), "verify": self.verify.get()})
+        selected = {self.files[i].path for i in self.tree.checked if i in self.files}
+
+        def done(rows):
+            self.app.log(f"Duplicate report saved: {path} ({rows:,} files).")
+            if messagebox.askyesno(APP_NAME, f"Saved {rows:,} files in {len(groups):,} groups to:\n{path}\n\n"
+                                   "Open it now?"):
+                open_url_or_file(path)
+        self.app.run_task("Exporting duplicates to Excel", lambda c: export_duplicates_xlsx(
+            groups, path, scan["roots"], scan["mode"], scan["verify"], selected), done)
 
     def _open_selected(self, _e=None) -> None:
         for iid in self.tree.tree.selection():
@@ -784,6 +818,13 @@ class DuplicatesTab(ttk.Frame):
             for i in blocked:
                 self.tree.set_checked(i, False)
             targets = [i for i in targets if i not in blocked]
+        program = [i for i in targets if in_program_folder(self.files[i].path)]
+        if program and not messagebox.askyesno(
+                APP_NAME, f"{len(program):,} of the selected files belong to a program or project folder "
+                "(for example a Python environment) or are program libraries.\n\n"
+                "Deleting them can stop that program or project from working.\n\n"
+                "Move them to the Recycle Bin anyway?", icon="warning", default="no"):
+            return
         size = sum(self.files[i].size for i in targets)
         if not messagebox.askyesno(APP_NAME, f"Move {len(targets):,} files ({human_size(size)}) to the Recycle "
                                    "Bin?\n\nYou can restore them from the Recycle Bin if needed."):
