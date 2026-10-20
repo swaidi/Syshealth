@@ -53,9 +53,16 @@ def get(section: str) -> Optional[dict]:
     return load().get(section)
 
 
-def record_action(category: str, action: str, detail: str = "") -> None:
-    """Append an entry to SysHealth's own change history."""
+MAX_ITEMS = 1000
+
+
+def record_action(category: str, action: str, detail: str = "", items: Optional[list[str]] = None) -> None:
+    """Append an entry to SysHealth's own change history. items lists the files or settings affected
+    (the first MAX_ITEMS are kept, with the total count)."""
     entry = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "category": category, "action": action, "detail": detail}
+    if items:
+        entry["items"] = [str(i) for i in items[:MAX_ITEMS]]
+        entry["item_count"] = len(items)
     with _lock:
         with open(history_path(), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")

@@ -5,10 +5,12 @@ import os
 import re
 import shutil
 import socket
+import time
 import threading
 import urllib.request
 
 import psutil
+from typing import Optional
 
 from .checks import FAIL, INFO, OK, WARN, Check, Fix
 from .platform_utils import IS_WINDOWS, open_url_or_file, ps_json, run_cmd, win_system_exe
@@ -72,6 +74,58 @@ def _ping(host: str) -> bool:
     return rc == 0
 
 
+VPN_NAME_PARTS = ("vpn", "proton", "wireguard", "openvpn", "tap-windows", "nordlynx", "fortinet", "anyconnect",
+                  "globalprotect", "pangp", "zscaler", "tailscale", "zerotier", "wg0", "tun0", "tun1", "ppp0")
+# Security and management agents that show a computer is managed by an organization (service or process names)
+MANAGEMENT_AGENTS = {"csfalconservice": "CrowdStrike Falcon", "falcon-sensor": "CrowdStrike Falcon",
+                     "sentinelagent": "SentinelOne", "sentinelone": "SentinelOne", "stagentsvc": "Netskope",
+                     "zsatunnel": "Zscaler", "cylancesvc": "Cylance", "intunemanagementextension": "Microsoft Intune",
+                     "ccmexec": "Microsoft Configuration Manager", "sense": "Microsoft Defender for Endpoint"}
+RISKY_ON_MANAGED = {"reset_stack", "renew_ip", "reset_proxy", "disable_user_proxy"}
+_managed_cache: Optional[str] = None
+
+
+def vpn_adapters() -> list[str]:
+    """Names of connected network adapters that belong to a VPN."""
+    try:
+        stats = psutil.net_if_stats()
+    except OSError:
+        return []
+    return sorted(n for n, st in stats.items() if st.isup and any(p in n.lower() for p in VPN_NAME_PARTS))
+
+
+def managed_device() -> str:
+    """A sentence describing how this computer is managed by an organization, or "" for a personal computer."""
+    global _managed_cache
+    if _managed_cache is not None:
+        return _managed_cache
+    found: list[str] = []
+    if IS_WINDOWS:
+        rows = ps_json("Get-CimInstance Win32_ComputerSystem | Select-Object PartOfDomain, Domain")
+        if rows and rows[0].get("PartOfDomain"):
+            found.append(f"joined to the domain {rows[0].get('Domain')}")
+        rc, out = run_cmd([win_system_exe("dsregcmd.exe"), "/status"], timeout=20)
+        if rc == 0 and re.search(r"AzureAdJoined\s*:\s*YES", out):
+            found.append("joined to Microsoft Entra ID (Azure AD)")
+        try:
+            for svc in psutil.win_service_iter():
+                name = svc.name().lower()
+                if name in MANAGEMENT_AGENTS and (name != "sense" or svc.status() == "running"):
+                    found.append(MANAGEMENT_AGENTS[name])
+        except Exception:
+            pass
+    else:
+        for proc in psutil.process_iter(["name"]):
+            name = (proc.info.get("name") or "").lower()
+            if name in MANAGEMENT_AGENTS:
+                found.append(MANAGEMENT_AGENTS[name])
+        if shutil.which("realm") and run_cmd(["realm", "list"], timeout=10)[1].strip():
+            found.append("joined to a company directory")
+    found = list(dict.fromkeys(found))
+    _managed_cache = ("This computer is managed by your organization (" + "; ".join(found) + ").") if found else ""
+    return _managed_cache
+
+
 def _hosts_entries() -> list[str]:
     entries = []
     try:
@@ -112,37 +166,78 @@ def run_checks(log=None) -> list[Check]:
     else:
         checks.append(Check("Network adapters", FAIL, "No connected adapter with an IPv4 address.", "renew_ip"))
 
-    # Gateway
+    # Context: VPNs and company management explain many "failures" on office networks
+    vpns = vpn_adapters()
+    managed = managed_device()
+    risky_fix = None if managed else "reset_stack"
+
+    # Internet: test like a browser first (a normal web request, honouring the system proxy),
+    # then direct connections, which office firewalls often block on purpose
+    probe = _http_probe()
+    web_ok = probe == "ok"
+    ip_ok = _tcp_ok("1.1.1.1", 443) or _tcp_ok("8.8.8.8", 53)
+
     gw = default_gateway()
     if not gw:
-        checks.append(Check("Default gateway", FAIL, "No default gateway configured.", "renew_ip"))
+        checks.append(Check("Default gateway", INFO if web_ok else FAIL, "No default gateway configured" +
+                            (" (normal while a VPN routes all traffic)." if web_ok else "."),
+                            None if web_ok else "renew_ip"))
     elif _ping(gw):
         checks.append(Check("Default gateway", OK, f"{gw} is reachable."))
     else:
-        checks.append(Check("Default gateway", WARN, f"{gw} does not answer ping (some routers block ping).",
-                            "renew_ip"))
+        checks.append(Check("Default gateway", INFO if web_ok else WARN,
+                            f"{gw} does not answer ping. Many routers and office networks block ping on purpose"
+                            + ("; the internet works, so this is harmless." if web_ok else "."),
+                            None if web_ok else "renew_ip"))
 
-    # Internet
-    ip_ok = _tcp_ok("1.1.1.1", 443) or _tcp_ok("8.8.8.8", 53)
-    checks.append(Check("Internet (IP)", OK if ip_ok else FAIL,
-                        "Public internet reachable." if ip_ok else "Cannot reach public IP addresses.",
-                        None if ip_ok else "reset_stack"))
-
-    dns_ok = _dns_ok("www.microsoft.com") and _dns_ok("www.google.com")
-    if dns_ok:
-        checks.append(Check("DNS resolution", OK, "Domain names resolve correctly."))
+    if web_ok:
+        checks.append(Check("Internet", OK, "Web access works (tested with a normal web request)."))
+        if not ip_ok:
+            checks.append(Check("Direct connections", INFO, "Direct connections to public DNS servers (1.1.1.1, "
+                                "8.8.8.8) are blocked by this network. This is common on company networks and "
+                                "does not affect normal use."))
+    elif probe == "captive":
+        checks.append(Check("Internet", WARN, "A login page (captive portal) or proxy intercepts web traffic. "
+                            "Open a browser and sign in to the network."))
+    elif ip_ok:
+        checks.append(Check("Internet", WARN, "Public addresses are reachable, but the web test failed. A proxy, "
+                            "firewall or security software may be filtering web traffic.",
+                            None if managed else ("reset_proxy" if IS_WINDOWS else None)))
     else:
-        checks.append(Check("DNS resolution", FAIL, "Domain names do not resolve.", "flush_dns"))
+        checks.append(Check("Internet", FAIL, "No internet access: the web test and direct connections failed." +
+                            (" This computer is managed by your organization; contact IT before resetting "
+                             "network settings." if managed else ""), risky_fix))
 
-    if ip_ok and dns_ok:
-        probe = _http_probe()
-        if probe == "ok":
-            checks.append(Check("Web access", OK, "HTTP connectivity test passed."))
-        elif probe == "captive":
-            checks.append(Check("Web access", WARN, "A login page (captive portal) or proxy intercepts traffic."))
-        else:
-            checks.append(Check("Web access", WARN, "HTTP test failed; a proxy or firewall may block web traffic.",
-                                "reset_proxy" if IS_WINDOWS else None))
+    # DNS: several names, a patient timeout, and timing so slow lookups are reported as slow, not broken
+    resolved, slowest = 0, 0.0
+    for name in ("www.microsoft.com", "www.google.com", "www.cloudflare.com", "github.com"):
+        started = time.monotonic()
+        if _dns_ok(name, timeout=8):
+            resolved += 1
+            slowest = max(slowest, time.monotonic() - started)
+    if resolved == 0 and not web_ok:
+        checks.append(Check("DNS resolution", FAIL, "Domain names do not resolve.", "flush_dns"))
+    elif resolved == 0:
+        checks.append(Check("DNS resolution", INFO, "Lookups from this app failed, but web access works; your "
+                            "network or proxy resolves names for you."))
+    elif slowest > 2:
+        cause = (f" A VPN adapter ({vpns[0]}) may be listed first with a DNS server that does not answer while "
+                 "the VPN is disconnected." if vpns else "")
+        checks.append(Check("DNS resolution", WARN, f"Names resolve, but slowly ({slowest:.1f} s).{cause}",
+                            "flush_dns"))
+    elif resolved < 4:
+        checks.append(Check("DNS resolution", WARN, f"Only {resolved} of 4 test names resolved; some lookups fail "
+                            "or time out. A filtering DNS server, VPN or security software may be blocking them.",
+                            "flush_dns"))
+    else:
+        checks.append(Check("DNS resolution", OK, "Domain names resolve correctly (4 of 4 tested)."))
+
+    if vpns:
+        checks.append(Check("VPN", INFO, "VPN adapters present: " + ", ".join(vpns) + ". VPNs change routes and "
+                            "DNS servers, which can explain slow lookups or repeated sign-in prompts."))
+    if managed:
+        checks.append(Check("Managed computer", INFO, managed + " Network resets and proxy changes can break "
+                            "company settings; contact IT before using them."))
 
     # DNS servers
     if IS_WINDOWS:

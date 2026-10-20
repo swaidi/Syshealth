@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 import csv
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -10,7 +11,7 @@ from core import changes, events, netperf, state
 from core.checks import INFO, WARN
 from core.connections import end_process
 from core.monitor import Sampler
-from core.platform_utils import APP_NAME, NeedsAdmin, human_size
+from core.platform_utils import APP_NAME, NeedsAdmin, human_size, open_location
 from ui.common import MutedLabel, Table, card
 
 
@@ -44,6 +45,9 @@ class ChangesPage(ttk.Frame):
         self.table = Table(self, [("when", "When", 150), ("category", "Category", 120), ("change", "Change", 420),
                                   ("detail", "Detail", 420)])
         self.table.pack(fill=tk.BOTH, expand=True)
+        self.table.tree.bind("<Double-1>", self.show_details)
+        MutedLabel(self, text="Double-click a SysHealth entry to see every file or item it affected.").pack(
+            anchor=tk.W, pady=(4, 0), before=self.table)
 
     def scan(self) -> None:
         days = int(self.days.get().split()[0])
@@ -68,20 +72,80 @@ class ChangesPage(ttk.Frame):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)
-            w.writerow(["When", "Category", "Change", "Detail"])
+            w.writerow(["When", "Category", "Change", "Detail", "Affected items"])
             for c in self.items:
                 if self.cat.get() in ("All", c.category):
-                    w.writerow([c.when, c.category, c.title, c.detail])
+                    w.writerow([c.when, c.category, c.title, c.detail, " | ".join(c.items)])
         self.app.log(f"Change history exported to {path}")
 
     def render(self) -> None:
         self.table.clear()
         shown = [c for c in self.items if self.cat.get() in ("All", c.category)]
         for c in shown:
-            self.table.add((c.when, c.category, c.title, c.detail), c)
+            detail = c.detail
+            if c.item_count:
+                detail = (detail + "  ·  " if detail else "") + f"{c.item_count:,} item(s), double-click for the list"
+            self.table.add((c.when, c.category, c.title, detail), c)
         counts = collections.Counter(c.category for c in self.items)
         self.summary.set(f"{len(shown)} change(s) shown · " +
                          " · ".join(f"{k}: {n}" for k, n in sorted(counts.items())))
+
+
+    def show_details(self, _event=None) -> None:
+        sel = self.table.selected()
+        if sel and sel[0].items:
+            ChangeDetails(self.app, sel[0])
+
+
+class ChangeDetails(tk.Toplevel):
+    """Every file or item affected by one SysHealth action."""
+
+    def __init__(self, app, change):
+        super().__init__(app)
+        self.app = app
+        self.change = change
+        self.title("Action details")
+        self.configure(background=app.palette["app"])
+        from ui.update_dialog import _center
+        _center(self, app, 900, 520)
+        self.transient(app)
+        btns = ttk.Frame(self, padding=(16, 8, 16, 16))
+        btns.pack(side=tk.BOTTOM, fill=tk.X)
+        body = ttk.Frame(self, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=change.title, style="PageTitle.TLabel", wraplength=860, justify=tk.LEFT).pack(anchor=tk.W)
+        info = change.when + (f"  ·  {change.detail}" if change.detail else "")
+        if change.item_count > len(change.items):
+            info += f"  ·  showing the first {len(change.items):,} of {change.item_count:,}"
+        ttk.Label(body, text=info, style="Muted.TLabel", wraplength=860).pack(anchor=tk.W, pady=(2, 10))
+        self.list = Table(body, [("item", "File or item", 840)])
+        self.list.pack(fill=tk.BOTH, expand=True)
+        for item in change.items:
+            self.list.add((item,), item)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Copy list", command=self.copy).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btns, text="Open location", command=self.open_location).pack(side=tk.LEFT)
+
+    @staticmethod
+    def _path(item: str) -> str:
+        return item.split("  ->  ")[0].split("  (")[0]
+
+    def open_location(self) -> None:
+        sel = self.list.selected()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Select an item first.", parent=self)
+            return
+        path = self._path(sel[0])
+        folder = path if os.path.isdir(path) else os.path.dirname(path)
+        if os.path.isdir(folder):
+            open_location(path if os.path.exists(path) else folder)
+        else:
+            messagebox.showinfo(APP_NAME, f"This location no longer exists:\n{folder}", parent=self)
+
+    def copy(self) -> None:
+        self.app.clipboard_clear()
+        self.app.clipboard_append("\n".join(self.change.items))
+        self.app.set_status(f"Copied {len(self.change.items):,} item(s) to the clipboard.")
 
 
 # =============================================================================== event log

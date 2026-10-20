@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .safety import is_protected_dir, running_browsers
 from .platform_utils import (IS_WINDOWS, Cancelled, NeedsAdmin, human_size, is_admin, is_protected,
                              powershell, run_cmd, run_stream, wrap_privileged)
 
@@ -143,7 +144,7 @@ def categories() -> list[Category]:
             Category("crash_sys", "System crash dumps and reports", "Blue-screen dumps and system error reports.",
                      [os.path.join(root, "Minidump"), os.path.join(pdata, r"Microsoft\Windows\WER\ReportArchive"),
                       os.path.join(pdata, r"Microsoft\Windows\WER\ReportQueue")], 0, admin=True),
-            Category("browser", "Browser caches", "Chrome, Edge, Brave and Firefox caches. Close browsers first.",
+            Category("browser", "Browser caches", "Chrome, Edge, Brave and Firefox caches. Skipped while a browser is open.",
                      _browser_cache_patterns(), 0),
         ]
     else:
@@ -153,7 +154,7 @@ def categories() -> list[Category]:
                      ["/tmp", "/var/tmp"], 24),
             Category("thumbs", "Thumbnail cache", "Preview images; rebuilt when needed.",
                      [os.path.join(home, ".cache", "thumbnails")], 0),
-            Category("browser", "Browser caches", "Chrome, Chromium, Brave and Firefox caches. Close browsers first.",
+            Category("browser", "Browser caches", "Chrome, Chromium, Brave and Firefox caches. Skipped while a browser is open.",
                      _browser_cache_patterns(), 0),
             Category("app_cache", "Application caches", "Other files in ~/.cache older than 7 days.",
                      [p for p in glob.glob(os.path.join(home, ".cache", "*")) if os.path.basename(p) not in
@@ -204,6 +205,12 @@ def clean(cat: Category, log: LogFn, cancel=None) -> tuple[int, int]:
         return (size, count) if rc == 0 else (0, 0)
     if cat.admin and IS_WINDOWS and not is_admin():
         raise NeedsAdmin(cat.title)
+    if cat.id == "browser":
+        open_now = running_browsers()
+        if open_now:  # clearing a running browser's cache can break pages and extensions
+            if log:
+                log(f"Browser caches skipped: close {', '.join(open_now)} first, then run the cleanup again.")
+            return 0, 0
     freed, removed = 0, 0
     targets = _expand(cat.patterns)
     for path, size in list(_iter_files(targets, cat.older_than_hours, cancel)):
@@ -241,9 +248,15 @@ def downloads_folder() -> str:
 def old_files(folder: str, days: int, cancel=None) -> list[tuple[str, int, float]]:
     cutoff = time.time() - days * 86400
     out = []
+    from .duplicates import is_program_dir
     for dp, dirs, files in os.walk(folder, onerror=lambda e: None):
         if cancel is not None and cancel.is_set():
             raise Cancelled()
+        # never offer files of installed or portable programs (for example Tor Browser in Downloads)
+        dirs[:] = [d for d in dirs if not is_protected_dir(os.path.join(dp, d))
+                   and not is_program_dir(os.path.join(dp, d), d)]
+        if is_protected_dir(dp):
+            continue
         for f in files:
             p = os.path.join(dp, f)
             try:
@@ -257,6 +270,11 @@ def old_files(folder: str, days: int, cancel=None) -> list[tuple[str, int, float
 
 
 # --------------------------------------------------------------------------- empty folders
+def _inside_app_data(path: str) -> bool:
+    from .safety import protected_reason
+    return protected_reason(path) is not None
+
+
 def _is_junk_only(names: list[str]) -> bool:
     return all(n.lower() in JUNK_NAMES for n in names)
 
@@ -269,7 +287,7 @@ def empty_folders(roots: list[str], cancel=None) -> list[str]:
         for dp, dirs, files in os.walk(root, topdown=False, onerror=lambda e: None):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            if dp == root or is_protected(dp) or os.path.islink(dp):
+            if dp == root or is_protected(dp) or os.path.islink(dp) or _inside_app_data(dp):
                 continue
             if _is_junk_only(files) and all(os.path.join(dp, d) in empty for d in dirs):
                 empty.add(dp)
@@ -280,6 +298,9 @@ def empty_folders(roots: list[str], cancel=None) -> list[str]:
 def remove_empty_folders(folders: list[str], log: LogFn) -> tuple[int, list[str]]:
     removed, errors = 0, []
     for d in sorted(folders, key=lambda p: p.count(os.sep), reverse=True):
+        if _inside_app_data(d):
+            errors.append(f"{d}: left unchanged because it is application data")
+            continue
         try:
             for name in os.listdir(d):
                 p = os.path.join(d, name)

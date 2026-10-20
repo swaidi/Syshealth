@@ -54,6 +54,10 @@ def check_allowed(path: str) -> Optional[str]:
         return "is a drive root"
     if p in (os.path.expanduser("~"), os.path.abspath(os.sep)):
         return "is your home folder"
+    from .safety import protected_reason
+    reason = protected_reason(p)
+    if reason:
+        return "is protected because " + reason
     return None
 
 

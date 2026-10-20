@@ -154,6 +154,10 @@ class LargeFilesPage(ttk.Frame):
         if blocked:
             messagebox.showwarning(APP_NAME, "Files in system folders cannot be deleted here.")
             return
+        allowed = set(self.app.guard_paths([f.path for f in sel], "moved"))
+        sel = [f for f in sel if f.path in allowed]
+        if not sel:
+            return
         size = sum(f.size for f in sel)
         if not messagebox.askyesno(APP_NAME, f"Move {len(sel)} file(s) ({human_size(size)}) to the Recycle Bin?"):
             return
@@ -168,7 +172,7 @@ class LargeFilesPage(ttk.Frame):
             self.files.tree.delete(iid)
             self.files.data.pop(iid, None)
         state.record_action("Large files", f"Moved {len(removed)} large file(s) to the Recycle Bin",
-                            human_size(sum(f.size for f in removed)))
+                            human_size(sum(f.size for f in removed)), [f.path for f in removed])
         self.app.log(f"Moved {len(removed)} file(s) to the Recycle Bin.")
 
 
@@ -315,18 +319,24 @@ class CleanupPage(ttk.Frame):
         if not chosen:
             messagebox.showinfo(APP_NAME, "Select files first.")
             return
+        allowed = set(self.app.guard_paths([self.dl_paths[i][0] for i in chosen], "moved"))
+        chosen = [i for i in chosen if self.dl_paths[i][0] in allowed]
+        if not chosen:
+            return
         size = sum(self.dl_paths[i][1] for i in chosen)
         if not messagebox.askyesno(APP_NAME, f"Move {len(chosen)} file(s) ({human_size(size)}) to the Recycle Bin?"):
             return
-        moved = 0
+        moved, moved_paths = 0, []
         for iid in chosen:
             try:
                 send2trash(os.path.normpath(self.dl_paths[iid][0]))
+                moved_paths.append(self.dl_paths[iid][0])
                 self.dl.remove(iid)
                 moved += 1
             except Exception as exc:
                 self.app.log(f"Could not move {self.dl_paths[iid][0]}: {exc}")
-        state.record_action("Cleanup", f"Moved {moved} old download(s) to the Recycle Bin", human_size(size))
+        state.record_action("Cleanup", f"Moved {moved} old download(s) to the Recycle Bin", human_size(size),
+                            moved_paths)
         self.dl_summary.set(f"Moved {moved} file(s) to the Recycle Bin.")
 
     # ------------------------------------------------------------------ empty folders
@@ -368,13 +378,14 @@ class CleanupPage(ttk.Frame):
         self.app.run_task("Finding empty folders", lambda c: cleanup.empty_folders([root], c), done)
 
     def delete_empty(self) -> None:
-        chosen = [self.empty_paths[i] for i in self.empty.checked if i in self.empty_paths]
+        chosen = self.app.guard_paths([self.empty_paths[i] for i in self.empty.checked if i in self.empty_paths],
+                                      "deleted")
         if not chosen or not messagebox.askyesno(APP_NAME, f"Delete {len(chosen)} empty folder(s)?"):
             return
         n, errors = cleanup.remove_empty_folders(chosen, self.app.log)
         for e in errors:
             self.app.log(f"Could not delete {e}")
-        state.record_action("Cleanup", f"Removed {n} empty folder(s)")
+        state.record_action("Cleanup", f"Removed {n} empty folder(s)", "", chosen)
         self.find_empty()
 
     # ------------------------------------------------------------------ optimize

@@ -160,7 +160,7 @@ class ShredderPage(ttk.Frame):
             n, size, errors = r
             for e in errors:
                 self.app.log(f"Could not shred {e}")
-            state.record_action("Shredder", f"Shredded {n} file(s)", human_size(size))
+            state.record_action("Shredder", f"Shredded {n} file(s)", human_size(size), list(paths))
             self.table.clear()
             messagebox.showinfo(APP_NAME, f"Shredded {n} file(s), {human_size(size)}." +
                                 (f"\n{len(errors)} item(s) failed (see log)." if errors else ""))

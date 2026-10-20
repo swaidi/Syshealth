@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import persistence, state
@@ -25,6 +25,8 @@ class Change:
     category: str  # Apps | System updates | Services | Drivers | Startup | Restarts | SysHealth
     title: str
     detail: str = ""
+    items: list = field(default_factory=list)   # files or settings affected (SysHealth actions)
+    item_count: int = 0
 
 
 def _since(days: int) -> str:
@@ -237,8 +239,9 @@ def collect(days: int = 7, log: LogFn = None, cancel: Optional[threading.Event] 
                  for a in added] +
                 [Change(when, "Startup", f"Autostart removed: {r['name']}", r["category"]) for r in removed])
     step("startup entries", startup_changes)
-    step("SysHealth history", lambda: [Change(h["time"][:16], "SysHealth", h["action"], h.get("detail", ""))
-                                         for h in state.read_history(days)])
+    step("SysHealth history", lambda: [Change(h["time"][:16], "SysHealth", h["action"], h.get("detail", ""),
+                                              h.get("items", []), h.get("item_count", len(h.get("items", []))))
+                                       for h in state.read_history(days)])
 
     def sort_key(c: Change):
         w = c.when.replace("since ", "")

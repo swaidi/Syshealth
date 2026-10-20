@@ -82,6 +82,7 @@ class App(tk.Tk):
         self.log(f"{APP_NAME} {VERSION} started. Administrator rights: {'yes' if is_admin() else 'no'}.")
         self._report_finished_update()
         self.after(4000, self._startup_update_check)
+        self.after(8000, self._check_signature_age)
 
     # ------------------------------------------------------------------ layout
     def _build_header(self) -> None:
@@ -402,6 +403,19 @@ class App(tk.Tk):
     def report_callback_exception(self, exc, val, tb) -> None:  # unexpected errors in buttons and events
         self.report_error("Unexpected error", val, tb)
 
+    def guard_paths(self, paths: list[str], action: str) -> list[str]:
+        """Final safety check before deleting, moving or renaming: drop anything in app data, and say so."""
+        from core.safety import split_allowed
+        allowed, blocked = split_allowed(paths)
+        if blocked:
+            for p, reason in blocked[:30]:
+                self.log(f"Protected, left unchanged: {p} ({reason})")
+            messagebox.showwarning(APP_NAME, f"{len(blocked):,} item(s) were left out and will not be {action}, "
+                                   "because they are application data: browser profiles, sign-ins, passwords, "
+                                   "extensions or app settings. Changing them can sign you out or break apps.\n\n"
+                                   "The activity log lists them.")
+        return allowed
+
     def open_feedback(self, kind: str = "suggestion") -> None:
         from ui.feedback import FeedbackDialog
         FeedbackDialog(self, kind)
@@ -433,6 +447,15 @@ class App(tk.Tk):
         if fix.reboot:
             notes.append("A restart is required to complete this action.")
         msg = f"{fix.title}\n\n{fix.description}\n\nCommands:\n{fix.preview()}"
+        from core import network as net
+        if fix.id in net.RISKY_ON_MANAGED:
+            managed = net.managed_device()
+            if managed:
+                if not messagebox.askyesno(
+                        "Company-managed computer", f"{managed}\n\n'{fix.title}' can remove VPN adapters, "
+                        "company proxy or network settings, and may need IT to restore them.\n\n"
+                        "Contact your IT department first. Continue anyway?", icon="warning", default="no"):
+                    return False
         if notes:
             msg += "\n\n" + "\n".join(notes)
         return messagebox.askyesno("Confirm action", msg + "\n\nProceed?")
@@ -467,6 +490,30 @@ class App(tk.Tk):
                                "You can also install it later from the Malware Scan page."):
             self.show_page("malware")
             self.mal_tab.install_clamav()
+
+    # ------------------------------------------------------------------ malware signature freshness
+    def _check_signature_age(self) -> None:
+        """Every hour: if signatures are over 3 days old and no reminder is postponed, show the reminder."""
+        from core.malware import stale_engines
+        from ui import reminders
+        self.after(3600 * 1000, self._check_signature_age)
+        if not reminders.reminder_due() or any(isinstance(w, reminders.SignatureReminder)
+                                               for w in self.winfo_children()):
+            return
+
+        def worker():
+            try:
+                stale = stale_engines(self.mal_tab.clam, self.mal_tab.defender if IS_WINDOWS else None)
+            except Exception as exc:
+                self.log(f"Signature age check skipped: {exc}")
+                return
+            if stale:
+                self.ui(lambda: reminders.SignatureReminder(self, stale, self._update_signatures_now))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_signatures_now(self) -> None:
+        self.show_page("malware")
+        self.mal_tab.update_signatures()
 
     # ------------------------------------------------------------------ SysHealth updates
     def _report_finished_update(self) -> None:
@@ -570,10 +617,11 @@ class DashboardPage(ttk.Frame):
         grid = scroll.inner
         for c in range(self.COLUMNS):
             grid.columnconfigure(c, weight=1, uniform="cards")
+        self._build_schedule(grid)
         self.cards: dict[str, tuple] = {}
         for i, (key, title) in enumerate(self.CARDS):
             box = card(grid, 16)
-            box.grid(row=i // self.COLUMNS, column=i % self.COLUMNS, sticky="nsew", padx=5, pady=5)
+            box.grid(row=1 + i // self.COLUMNS, column=i % self.COLUMNS, sticky="nsew", padx=5, pady=5)
             ttk.Label(box, text=title, style="CardTitle.TLabel").pack(anchor=tk.W)
             badge = ThemedLabel(box, "muted", size=10, bold=True, text="ℹ Not checked")
             badge.pack(anchor=tk.W, pady=(8, 0))
@@ -588,6 +636,91 @@ class DashboardPage(ttk.Frame):
             ttk.Button(foot, text="Open", command=lambda k=key: app.show_page(k)).pack(side=tk.RIGHT)
             self.cards[key] = (badge, value, detail, updated)
         self.load_from_state()
+
+    # ------------------------------------------------------------------ maintenance schedule
+    SCHEDULE_ROLES = {"overdue": "fail", "never": "warn", "soon": "warn", "ok": "ok"}
+
+    def _build_schedule(self, grid) -> None:
+        """A compact list (not cards): each routine task, when it was last done, and what is due."""
+        box = card(grid, 14)
+        box.grid(row=0, column=0, columnspan=self.COLUMNS, sticky="nsew", padx=5, pady=(0, 10))
+        head = ttk.Frame(box)
+        head.pack(fill=tk.X)
+        ttk.Label(head, text="Maintenance schedule", style="CardTitle.TLabel").pack(side=tk.LEFT)
+        self.sched_summary = ThemedLabel(head, "muted", size=10, bold=True, text="")
+        self.sched_summary.pack(side=tk.LEFT, padx=12)
+        MutedLabel(head, text="Routine tasks and when each was last done.").pack(side=tk.RIGHT)
+        self.sched_rows = ttk.Frame(box)
+        self.sched_rows.pack(fill=tk.X, pady=(8, 0))
+        for col, weight in enumerate((3, 2, 1, 2, 0)):
+            self.sched_rows.columnconfigure(col, weight=weight)
+        self._sched_widgets: list = []
+        self.after(1500, self.refresh_schedule)
+
+    def _schedule_actions(self) -> dict:
+        app = self.app
+        return {
+            "signatures": ("Update", app._update_signatures_now),
+            "malware_scan": ("Scan", self.quick_scan),
+            "health": ("Run", app.run_all_checks),
+            "app_updates": ("Check", lambda: (app.show_page("updates"), app.pages["updates"].refresh())),
+            "events": ("Review", lambda: (app.show_page("events"), app.pages["events"].scan())),
+            "security": ("Run", lambda: (app.show_page("security"), app.pages["security"].run_checks())),
+            "startup": ("Review", lambda: (app.show_page("startup"), app.pages["startup"].scan())),
+            "cleanup": ("Analyze", lambda: (app.show_page("cleanup"), app.pages["cleanup"].analyze())),
+            "space": ("Open", lambda: app.show_page("largefiles")),
+            "duplicates": ("Open", lambda: app.show_page("duplicates")),
+        }
+
+    def refresh_schedule(self) -> None:
+        """Recalculate in the background (reading signature dates can take a moment), then redraw."""
+        from core import maintenance
+
+        def worker():
+            mal = self.app.mal_tab
+            extra = {"signatures": mal.clam.published}
+            if IS_WINDOWS:
+                defender_time = mal.defender.published
+                extra = {"signatures": lambda: max([t for t in (mal.clam.published(), defender_time()) if t],
+                                                   default=None)}
+            try:
+                tasks = maintenance.schedule(extra_last=extra)
+            except Exception as exc:
+                self.app.log(f"Maintenance schedule unavailable: {exc}")
+                return
+            maintenance.publish(tasks)
+            self.app.ui(lambda: self._draw_schedule(tasks))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _draw_schedule(self, tasks) -> None:
+        for w in self._sched_widgets:
+            w.destroy()
+        self._sched_widgets = []
+        actions = self._schedule_actions()
+        for c, text in enumerate(("Task", "Last done", "Every", "Status", "")):
+            lbl = MutedLabel(self.sched_rows, text=text)
+            lbl.grid(row=0, column=c, sticky="w", padx=(0, 12), pady=(0, 4))
+            self._sched_widgets.append(lbl)
+        for r, t in enumerate(tasks, 1):
+            cells = [ThemedLabel(self.sched_rows, "fg", size=10, bold=t.status != "ok", text=t.title),
+                     ThemedLabel(self.sched_rows, "fg", size=10,
+                                 text=t.last.strftime("%Y-%m-%d") if t.last else "Never"),
+                     MutedLabel(self.sched_rows, text=f"{t.every_days} days"),
+                     ThemedLabel(self.sched_rows, self.SCHEDULE_ROLES[t.status], size=10, bold=True, text=t.note)]
+            for c, w in enumerate(cells):
+                w.grid(row=r, column=c, sticky="w", padx=(0, 12), pady=1)
+            label, cmd = actions.get(t.id, ("Open", lambda p=t.page: self.app.show_page(p)))
+            btn = ttk.Button(self.sched_rows, text=label, command=cmd, width=9)
+            btn.grid(row=r, column=4, sticky="e", pady=1)
+            self._sched_widgets += cells + [btn]
+        due = sum(t.status in ("overdue", "never") for t in tasks)
+        soon = sum(t.status == "soon" for t in tasks)
+        self.sched_summary.configure(text=(f"{due} due" if due else "All up to date") +
+                                     (f" · {soon} due soon" if soon else ""))
+        self.sched_summary.set_role("warn" if due else "ok")
+
+    def on_show(self) -> None:
+        self.refresh_schedule()
 
     def load_from_state(self) -> None:
         for key, entry in state.load().items():
@@ -613,6 +746,8 @@ class DashboardPage(ttk.Frame):
             self.app.log(f"Could not save dashboard state: {exc}")
         if key in self.cards:
             self._show(key, level, value, detail, dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if key != "maintenance" and hasattr(self, "_sched_widgets"):
+            self.after(500, self.refresh_schedule)
 
     def quick_scan(self) -> None:
         self.app.show_page("malware")
@@ -630,7 +765,7 @@ class DuplicatesTab(ttk.Frame):
         self.files: dict[str, object] = {}
         self.group_of: dict[str, str] = {}
         app.page_header(self, "Duplicate Files", "Find copies by name or by size within the same file type. "
-                        "System folders are always excluded; program and project folders are skipped by default.")
+                        "System folders and app data (browser profiles, passwords, settings) are always excluded.")
 
         opts = card(self, 14)
         opts.pack(fill=tk.X)
@@ -653,12 +788,10 @@ class DuplicatesTab(ttk.Frame):
                         style="Switch.TCheckbutton").grid(row=2, column=1, sticky="w", pady=(12, 0), padx=(0, 20))
         ttk.Checkbutton(opts, text="Include hidden files", variable=self.hidden,
                         style="Switch.TCheckbutton").grid(row=2, column=2, sticky="w", pady=(12, 0), padx=(0, 20))
-        ttk.Checkbutton(opts, text="Include app data", variable=self.appdata,
-                        style="Switch.TCheckbutton").grid(row=2, column=3, sticky="w", pady=(12, 0), padx=(0, 20))
         self.program = tk.BooleanVar(value=False)
         ttk.Checkbutton(opts, text="Include program folders (advanced)", variable=self.program,
                         style="Switch.TCheckbutton", command=self._warn_program).grid(
-            row=2, column=4, sticky="w", pady=(12, 0))
+            row=2, column=3, sticky="w", pady=(12, 0))
 
         size_row = ttk.Frame(opts)
         size_row.grid(row=3, column=1, columnspan=2, sticky="w", pady=(12, 0))
@@ -818,6 +951,12 @@ class DuplicatesTab(ttk.Frame):
             for i in blocked:
                 self.tree.set_checked(i, False)
             targets = [i for i in targets if i not in blocked]
+        keep_paths = set(self.app.guard_paths([self.files[i].path for i in targets], "moved"))
+        for i in [i for i in targets if self.files[i].path not in keep_paths]:
+            self.tree.set_checked(i, False)
+        targets = [i for i in targets if self.files[i].path in keep_paths]
+        if not targets:
+            return
         program = [i for i in targets if in_program_folder(self.files[i].path)]
         if program and not messagebox.askyesno(
                 APP_NAME, f"{len(program):,} of the selected files belong to a program or project folder "
@@ -830,6 +969,7 @@ class DuplicatesTab(ttk.Frame):
                                    "Bin?\n\nYou can restore them from the Recycle Bin if needed."):
             return
         paths = {i: self.files[i].path for i in targets}
+        sizes = {i: self.files[i].size for i in targets}
 
         def work(cancel):
             done, failed = [], []
@@ -855,6 +995,9 @@ class DuplicatesTab(ttk.Frame):
                         self.tree.remove(k)
                     self.tree.tree.delete(gid)
             self.app.log(f"Moved {len(done):,} files to the Recycle Bin.")
+            if done:
+                state.record_action("Duplicates", f"Moved {len(done):,} duplicate file(s) to the Recycle Bin",
+                                    human_size(sum(sizes[i] for i in done)), [paths[i] for i in done])
             for f in failed[:50]:
                 self.app.log(f"Could not move: {f}")
             self.update_selection_label()
@@ -871,7 +1014,9 @@ class LongPathsTab(ttk.Frame):
         self.app = app
         self.proposals: dict[str, long_paths.Proposal] = {}
         app.page_header(self, "Long Paths", "Find files whose full path is too long to open reliably, and "
-                        "shorten folder or file names to fix them.")
+                        "shorten folder or file names to fix them. App data and program folders are never renamed."
+                        + ("" if IS_WINDOWS else " On Linux this matters only for files you open on Windows, "
+                           "Office or OneDrive."))
 
         opts = card(self, 14)
         opts.pack(fill=tk.X)
@@ -980,7 +1125,7 @@ class LongPathsTab(ttk.Frame):
         for p in proposals:
             iid = self.tree.add_item("", p.old_name, (p.new_name, f"-{p.saves}", p.affected,
                                                      os.path.dirname(p.path)))
-            self.tree.set_checked(iid, True)
+            # nothing is selected automatically: renaming is always a deliberate choice
             self.proposals[iid] = p
         files = sum(1 for i in items if not i.is_dir)
         if not items:
@@ -1041,7 +1186,10 @@ class LongPathsTab(ttk.Frame):
                                    "lists and links inside other documents. Close any files open from these "
                                    "folders first.\n\nYou can reverse this with 'Undo last rename'."):
             return
-        chosen = {i: self.proposals[i] for i in iids}
+        allowed = set(self.app.guard_paths([self.proposals[i].path for i in iids], "renamed"))
+        chosen = {i: self.proposals[i] for i in iids if self.proposals[i].path in allowed}
+        if not chosen:
+            return
 
         def work(cancel):
             return long_paths.apply(list(chosen.values()), self.app.log, cancel)
@@ -1055,6 +1203,9 @@ class LongPathsTab(ttk.Frame):
                     self.proposals.pop(iid, None)
             for e in errors:
                 self.app.log(f"Rename failed: {e}")
+            if done:
+                state.record_action("Long paths", f"Renamed {len(done)} item(s)", "Undo is available on the "
+                                    "Long Paths page.", [f"{p.path}  ->  {p.new_name}" for p in done])
             self.summary.set(f"Renamed {len(done)} item(s)." + (f" {len(errors)} failed (see log)." if errors else
                                                                  " Scan again to confirm everything is fixed."))
             if errors:
@@ -1074,6 +1225,8 @@ class LongPathsTab(ttk.Frame):
             restored, errors = result
             for e in errors:
                 self.app.log(f"Undo failed: {e}")
+            if restored:
+                state.record_action("Long paths", f"Undid the last rename batch ({restored} name(s) restored)")
             self.tree.clear()
             self.proposals.clear()
             self.summary.set(f"Restored {restored} name(s)." + (f" {len(errors)} failed (see log)." if errors else
@@ -1099,8 +1252,10 @@ class MalwareTab(ttk.Frame):
         self.clam_var = tk.StringVar(value="ClamAV: checking…")
         self.def_var = tk.StringVar(value="Microsoft Defender: checking…" if IS_WINDOWS else
                                     "Microsoft Defender: Windows only")
-        ttk.Label(sig, textvariable=self.clam_var).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(sig, textvariable=self.def_var).grid(row=2, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(sig, textvariable=self.clam_var, wraplength=760, justify=tk.LEFT).grid(
+            row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(sig, textvariable=self.def_var, wraplength=760, justify=tk.LEFT).grid(
+            row=2, column=0, sticky="w", pady=(2, 0))
         bf = ttk.Frame(sig)
         bf.grid(row=0, column=1, rowspan=3, sticky="e")
         sig.columnconfigure(0, weight=1)
@@ -1163,9 +1318,18 @@ class MalwareTab(ttk.Frame):
         """Read engine status in the background so the window stays responsive."""
         def worker():
             installed = self.clam.installed()
-            clam = (f"ClamAV (Cisco Talos): {self.clam.db_status()}" if installed
+            clam = (f"ClamAV: {self.clam.db_status()}" if installed
                     else "ClamAV: not installed. Click 'Install ClamAV' to add it automatically.")
+            try:
+                from core.malware import stale_engines
+                old = dict(stale_engines(self.clam, self.defender if IS_WINDOWS else None))
+            except Exception:
+                old = {}
+            if "ClamAV" in old:
+                clam += "  ·  OUT OF DATE"
             defs = f"Microsoft Defender: {self.defender.status()}" if IS_WINDOWS else None
+            if defs and "Microsoft Defender" in old:
+                defs += "  ·  OUT OF DATE"
 
             def apply():
                 self.clam_var.set(clam)
@@ -1184,6 +1348,7 @@ class MalwareTab(ttk.Frame):
         def done(_r):
             self.refresh_status()
             if self.clam.installed():
+                state.record_action("Malware", "Installed ClamAV")
                 self.app.log("Downloading ClamAV signatures for the first time (about 300 MB)…")
                 self.update_signatures()
         self.app.run_task("Install ClamAV", lambda c: self.clam.install(self.app.log, c), done)
@@ -1198,7 +1363,17 @@ class MalwareTab(ttk.Frame):
             if IS_WINDOWS and self.defender.installed():
                 self.app.log("Updating Microsoft Defender signatures…")
                 self.defender.update(self.app.log, cancel)
-        self.app.run_task("Signature update", work, lambda _r: self.refresh_status())
+            return (self.clam.db_status() if self.clam.installed() else "ClamAV not installed",
+                    self.defender.status() if IS_WINDOWS and self.defender.installed() else "")
+
+        def done(result):
+            from ui import reminders
+            clam, defender = result
+            state.record_action("Malware", "Updated malware signatures",
+                                f"ClamAV: {clam}" + (f"; Defender: {defender}" if defender else ""))
+            reminders.clear()
+            self.refresh_status()
+        self.app.run_task("Signature update", work, done)
 
     # ------------------------------------------------------------------ scanning
     def scan(self) -> None:
@@ -1282,6 +1457,8 @@ class MalwareTab(ttk.Frame):
             self.tree.remove(iid)
             self.detections.pop(iid, None)
         self.app.log(f"Marked {len(sel)} item(s) as safe.")
+        state.record_action("Malware", f"Marked {len(sel)} item(s) as safe", "They will not be flagged again.",
+                            [f"{d.path}  ({d.name})" for _, d in sel])
 
     def _process(self, title: str, action, verb: str) -> None:
         sel = self._selected()
@@ -1293,6 +1470,8 @@ class MalwareTab(ttk.Frame):
                 "installed software.") if system else ""
         if not messagebox.askyesno(APP_NAME, f"{verb} {len(sel)} item(s)?{warn}"):
             return
+
+        by_id = {iid: d for iid, d in sel}
 
         def work(cancel):
             done, failed = [], []
@@ -1312,6 +1491,9 @@ class MalwareTab(ttk.Frame):
                 self.tree.remove(iid)
                 self.detections.pop(iid, None)
             self.app.log(f"{title}: {len(done)} item(s) processed.")
+            if done:
+                state.record_action("Malware", f"{verb}: {len(done)} item(s)", "",
+                                    [f"{by_id[i].path}  ({by_id[i].name})" for i in done])
             for f in failed:
                 self.app.log(f"Failed: {f}")
             if failed:
@@ -1384,11 +1566,16 @@ class QuarantineTab(ttk.Frame):
         ids = self.tree.selection()
         if not ids or not messagebox.askyesno(APP_NAME, f"Restore {len(ids)} item(s) to their original location?"):
             return
+        restored = []
         for i in ids:
             try:
-                self.app.log(f"Restored to {self.app.quarantine.restore(i)}")
+                dest = self.app.quarantine.restore(i)
+                restored.append(str(dest))
+                self.app.log(f"Restored to {dest}")
             except Exception as exc:
                 self.app.log(f"Restore failed: {exc}")
+        if restored:
+            state.record_action("Quarantine", f"Restored {len(restored)} item(s) from quarantine", "", restored)
         self.refresh()
 
     def purge(self) -> None:
@@ -1396,9 +1583,12 @@ class QuarantineTab(ttk.Frame):
         if not ids or not messagebox.askyesno(APP_NAME, f"Permanently delete {len(ids)} item(s)? "
                                               "This cannot be undone."):
             return
+        names = {q.id: q.original_path for q in self.app.quarantine.items()}
         for i in ids:
             self.app.quarantine.purge(i)
         self.app.log(f"Permanently deleted {len(ids)} quarantined item(s).")
+        state.record_action("Quarantine", f"Permanently deleted {len(ids)} quarantined item(s)", "",
+                            [names.get(i, i) for i in ids])
         self.refresh()
 
 

@@ -9,8 +9,8 @@ Credit: A.T.Grep
 ### Overview
 | Page | What it does |
 |---|---|
-| Dashboard | Status cards for every tool, backed by a shared state file. Results persist between sessions. One-click "Run all health checks". |
-| Recent Changes | Timeline of apps installed, updated or removed; Windows/Linux updates; new services and drivers; startup changes; restarts; and actions taken by SysHealth. |
+| Dashboard | Maintenance schedule (routine tasks, when each was last done, what is due, one-click run) and status cards for every tool, backed by a shared state file. Results persist between sessions. |
+| Recent Changes | Timeline of apps installed, updated or removed; Windows/Linux updates; new services and drivers; startup changes; restarts; and every action taken by SysHealth, with the files it affected (double-click an entry; Export history includes them). |
 
 ### Clean Up
 | Page | What it does |
@@ -23,7 +23,7 @@ Credit: A.T.Grep
 ### Protect
 | Page | What it does |
 |---|---|
-| Malware Scan | ClamAV (auto-installed for your OS) and Microsoft Defender, plus a check for unknown, unsigned or disguised programs. |
+| Malware Scan | ClamAV (auto-installed for your OS) and Microsoft Defender, plus a check for unknown, unsigned or disguised programs. Shows each engine's signature version, publication date and source, and reminds you when signatures are more than 3 days old (remind in 6 or 12 hours, or dismiss for 24 hours). |
 | Quarantine | AES-encrypted vault for detected files. Restore or delete permanently. |
 | Security | Score out of 100: antivirus, tamper protection, firewall, UAC, BitLocker, Secure Boot, TPM, SMBv1, Remote Desktop, auto sign-in, Guest account, SmartScreen (Linux: firewall, LUKS, Secure Boot, auto-updates, SSH). One-click hardening. |
 | Startup Apps | Programs that start at sign-in, with publisher. Enable or disable without deleting anything. |
@@ -35,7 +35,7 @@ Credit: A.T.Grep
 |---|---|
 | System Health | Resources, free space, uptime, pending restart, Defender, Windows Update, startup count; DISM + SFC repair. |
 | Disk Health | Drive health, temperature, wear and errors; volume scan, spot fix, full repair, SMART reports. |
-| Network | Adapters, gateway, internet, DNS, proxy, firewall, hosts file; DNS flush, IP renew, network reset. |
+| Network | Adapters, gateway, internet (tested like a browser), DNS speed, VPNs, company-managed computers, proxy, firewall, hosts file; DNS flush, IP renew, network reset (with a warning on company computers). |
 | DNS & Speed | Benchmarks Cloudflare, Google, Quad9, OpenDNS and your current DNS; switch with one click. Internet speed test. |
 | Event Log | Groups recent errors and explains common ones (crashes, unexpected shutdowns, disk errors) with advice. |
 | Live Monitor | Real-time CPU, memory, disk and network graphs; top programs; end process. |
@@ -72,6 +72,9 @@ The **Feedback** button in the header opens a report form. When any task fails, 
 
 ## Safety design
 
+- Application data is never deleted, moved, renamed or shredded: browser profiles (sign-ins, passwords, extensions such as VPNs), password stores and keyrings, app settings (Windows `AppData`; Linux hidden folders such as `~/.config`, `~/.local`, `~/.mozilla`) and browsers installed in Downloads or on the Desktop (for example Tor Browser). Scans skip these folders, and every delete or rename checks each path again just before acting.
+- Browser caches are cleaned only while all browsers are closed.
+- Long Paths never pre-selects renames.
 - System folders are excluded from deletion features; drive roots and the home folder cannot be shredded.
 - Deletions go to the Recycle Bin; threats go to an encrypted quarantine; long-path renames can be undone.
 - Every repair shows its exact commands and asks for confirmation.
@@ -94,7 +97,7 @@ Every feature publishes its latest result to `state.json`, and SysHealth's own a
 | File | Windows | Linux |
 |---|---|---|
 | App data folder | `%LOCALAPPDATA%\SysHealth` | `~/.local/share/SysHealth` |
-| Latest results | `state.json` | `state.json` |
+| Latest results (including the maintenance schedule) | `state.json` | `state.json` |
 | Action history | `history.jsonl` | `history.jsonl` |
 | Settings | `settings.json` | `settings.json` |
 | Quarantine, ClamAV signatures | `quarantine\`, `clamav-db\` | `quarantine/`, `clamav-db/` |

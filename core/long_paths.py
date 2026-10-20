@@ -9,6 +9,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .safety import is_protected_dir
 from .platform_utils import IS_WINDOWS, Cancelled, is_virtual_dir, list_dir, app_data_dir, norm, protected_roots
 
 LogFn = Optional[Callable[[str], None]]
@@ -91,7 +92,8 @@ def scan(roots: list[str], limit: int, cancel: Optional[threading.Event] = None,
                         if attrs & FILE_ATTRIBUTE_REPARSE_POINT:
                             continue
                     if is_dir:
-                        if norm(plain) in protected or is_virtual_dir(plain) or entry.name.lower() in (
+                        if norm(plain) in protected or is_virtual_dir(plain) or is_protected_dir(plain) \
+                            or _is_program_dir(plain, entry.name) or entry.name.lower() in (
                                 "$recycle.bin", "system volume information"):
                             continue
                         stack.append(entry.path)
@@ -103,6 +105,11 @@ def scan(roots: list[str], limit: int, cancel: Optional[threading.Event] = None,
                 except OSError:
                     continue
     return found, checked
+
+
+def _is_program_dir(path: str, name: str) -> bool:
+    from .duplicates import is_program_dir
+    return is_program_dir(path, name)
 
 
 # --------------------------------------------------------------------------- planning

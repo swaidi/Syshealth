@@ -11,6 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .safety import is_protected_dir
 from .platform_utils import IS_WINDOWS, Cancelled, is_virtual_dir, list_dir, human_size, norm, protected_roots
 
 FILE_ATTRIBUTE_HIDDEN = 0x2
@@ -106,7 +107,7 @@ def in_program_folder(path: str) -> bool:
 def _skip_dir(path: str, name: str, include_hidden: bool, include_appdata: bool, protected: set[str],
               include_program: bool = False) -> bool:
     low = name.lower()
-    if low in SKIP_DIR_NAMES:
+    if low in SKIP_DIR_NAMES or is_protected_dir(path):  # app data is never offered for deletion
         return True
     if not include_program and is_program_dir(path, name):
         return True
