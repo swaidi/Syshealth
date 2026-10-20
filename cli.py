@@ -200,7 +200,7 @@ def cmd_signatures(args) -> int:
     clam, defender = ClamAV(), Defender()
     failed = []
     if clam.installed():
-        if clam.update(Out.log, CANCEL) not in (0, 1):
+        if clam.update(Out.log, CANCEL) not in (0, 1) or not clam.has_db():
             failed.append("ClamAV")
         Out.log(f"ClamAV: {clam.db_status()}")
     else:

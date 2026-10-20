@@ -1385,6 +1385,8 @@ class MalwareTab(ttk.Frame):
                 rc = self.clam.update(self.app.log, cancel)
                 if rc not in (0, 1):  # freshclam: 0 = updated, 1 = already up to date
                     failed.append(f"ClamAV (freshclam exit code {rc})")
+                elif not self.clam.has_db():  # success means signatures actually exist
+                    failed.append("ClamAV (no signatures were downloaded)")
             else:
                 self.app.log("ClamAV is not installed; skipping.")
             if IS_WINDOWS and self.defender.installed():

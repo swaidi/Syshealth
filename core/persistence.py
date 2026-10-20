@@ -387,10 +387,13 @@ def _linux_systemd() -> list[AutoEntry]:
                 exec_out = ""
             m = re.search(r"path=(\S+)", exec_out)
             path = m.group(1) if m else ""
+            # keep only the command line: the rest (start_time, pid, status) changes at every boot
+            argv = re.search(r"argv\[\]=([^;]*)", exec_out)
+            command = (argv.group(1).strip() if argv else path) or unit
             if not user and path.startswith(("/usr/", "/lib/", "/bin/", "/sbin/")) and parts[1] == "enabled":
                 # distribution-provided service; keep but it is low interest
                 pass
-            out.append(AutoEntry("Service", unit, exec_out.strip()[:300] or unit,
+            out.append(AutoEntry("Service", unit, command[:300],
                                  "systemd (user)" if user else "systemd (system)", enabled=parts[1] == "enabled",
                                  scope="user" if user else "machine", path=path, sig_status="n/a",
                                  can_toggle=True, meta={"unit": unit, "user": user}))
@@ -593,6 +596,9 @@ def _linux_set_enabled(e: AutoEntry, enabled: bool) -> None:
 
 
 # --------------------------------------------------------------------------- change tracking
+SNAPSHOT_VERSION = 2
+
+
 def _snapshot_path() -> str:
     return os.path.join(app_data_dir(), "autoruns_snapshot.json")
 
@@ -605,14 +611,17 @@ def diff_with_snapshot(entries: list[AutoEntry], update: bool = True) -> tuple[l
             prev = json.load(fh)
     except (OSError, json.JSONDecodeError):
         prev = {}
-    prev_items = prev.get("items", {})
+    # Snapshots from before version 2 stored Linux service details that change at every boot; treat them as
+    # outdated and start a fresh baseline instead of reporting every service as removed and added.
+    prev_items = prev.get("items", {}) if prev.get("version", 1) >= SNAPSHOT_VERSION else {}
     current = {e.key: {"category": e.category, "name": e.name, "command": e.command, "location": e.location}
                for e in entries}
     added = [v for k, v in current.items() if k not in prev_items] if prev_items else []
     removed = [v for k, v in prev_items.items() if k not in current] if prev_items else []
     if update:
         with open(_snapshot_path(), "w", encoding="utf-8") as fh:
-            json.dump({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "items": current}, fh, ensure_ascii=False)
+            json.dump({"version": SNAPSHOT_VERSION, "time": time.strftime("%Y-%m-%d %H:%M:%S"), "items": current},
+                      fh, ensure_ascii=False)
     return added, removed, prev.get("time", "")
 
 
