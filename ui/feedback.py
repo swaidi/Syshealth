@@ -11,8 +11,10 @@ import platform
 import sys
 import tkinter as tk
 import urllib.parse
-import webbrowser
 from tkinter import filedialog, messagebox, ttk
+
+from core.platform_utils import mail_app_available, open_url_or_file
+from ui.common import copy_to_clipboard
 
 FEEDBACK_EMAIL = "dev.oasis006@passmail.net"
 MAILTO_LIMIT = 1800  # Windows limits the length of mailto links; longer reports go via the clipboard
@@ -73,10 +75,21 @@ class FeedbackDialog(tk.Toplevel):
                   style="Muted.TLabel").pack(anchor=tk.W, pady=(0, 4))
         self.preview = self._text(body, height=10, mono=True)
 
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Send by email", style="Accent.TButton", command=self.send_email).pack(side=tk.RIGHT)
+        # One clear path: copy (or email when an email program exists). Confirmations appear here, not as pop-ups.
+        self.has_mail = mail_app_available()
+        dest = ttk.Frame(btns)
+        dest.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(dest, text=f"Send to: {FEEDBACK_EMAIL}").pack(side=tk.LEFT)
+        ttk.Button(dest, text="Copy address", command=self.copy_address).pack(side=tk.LEFT, padx=8)
+        self.note = tk.StringVar(value="")
+        ttk.Label(dest, textvariable=self.note).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.LEFT)
+        if self.has_mail:
+            ttk.Button(btns, text="Send by email", style="Accent.TButton", command=self.send_email).pack(
+                side=tk.RIGHT)
         ttk.Button(btns, text="Save as file…", command=self.save).pack(side=tk.RIGHT, padx=6)
-        ttk.Button(btns, text="Copy report", command=self.copy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Copy report", style="TButton" if self.has_mail else "Accent.TButton",
+                   command=self.copy).pack(side=tk.RIGHT)
 
         self._user_edited = False
         self.preview.bind("<Key>", lambda e: setattr(self, "_user_edited", True))
@@ -142,10 +155,17 @@ class FeedbackDialog(tk.Toplevel):
             return False
         return True
 
+    def _say(self, text: str) -> None:
+        self.note.set(text)
+        self.app.log(text)
+
     def copy(self) -> None:
-        self.app.clipboard_clear()
-        self.app.clipboard_append(self.report())
-        self.app.set_status("Feedback report copied to the clipboard.")
+        copy_to_clipboard(self.app, self.report())
+        self._say("Report copied. Paste it with Ctrl+V.")
+
+    def copy_address(self) -> None:
+        copy_to_clipboard(self.app, FEEDBACK_EMAIL)
+        self._say("Email address copied.")
 
     def save(self) -> None:
         if not self._check_message():
@@ -156,31 +176,23 @@ class FeedbackDialog(tk.Toplevel):
         if path:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(self.report())
-            self.app.log(f"Feedback report saved to {path}")
+            self._say(f"Saved: {os.path.basename(path)}")
 
     def send_email(self) -> None:
         if not self._check_message():
             return
         report = self.report()
         body = report
-        if len(urllib.parse.quote(report)) > MAILTO_LIMIT:
-            self.copy()
-            body = ("The full report has been copied to the clipboard. Paste it here (Ctrl+V) before sending.\n\n"
-                    + self.message.get("1.0", tk.END).strip()[:600])
+        long_report = len(urllib.parse.quote(report)) > MAILTO_LIMIT
+        if long_report:  # email links have a size limit: the full report goes on the clipboard
+            copy_to_clipboard(self.app, report)
+            body = "(Paste the SysHealth report here with Ctrl+V.)\n\n" + self.message.get("1.0", tk.END).strip()[:600]
         url = (f"mailto:{FEEDBACK_EMAIL}?subject={urllib.parse.quote(self.subject())}"
                f"&body={urllib.parse.quote(body)}")
         try:
-            if sys.platform.startswith("win"):
-                os.startfile(url)  # type: ignore[attr-defined]
-            else:
-                webbrowser.open(url)
+            open_url_or_file(url)
         except OSError:
-            self.copy()
-            messagebox.showinfo("Send feedback", f"No email program is set up. The report has been copied to the "
-                                f"clipboard; paste it into an email to {FEEDBACK_EMAIL}.", parent=self)
+            copy_to_clipboard(self.app, report)
+            self._say("No email program. Report copied instead.")
             return
-        if body is not report:
-            messagebox.showinfo("Send feedback", "Your email program is opening. The full report is on the "
-                                "clipboard: paste it into the email body before sending.", parent=self)
-        self.app.log("Feedback email prepared.")
-        self.destroy()
+        self._say("Email opened. Paste the report with Ctrl+V." if long_report else "Email opened.")

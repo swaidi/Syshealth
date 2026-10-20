@@ -50,6 +50,7 @@ Run from a terminal. From source, replace `SysHealthCLI` with `python cli.py`.
 | `SysHealthCLI malware D:\Projects` | Scan a folder with ClamAV, Defender and the unknown-programs check. |
 | `SysHealthCLI signatures update` | Update ClamAV and Defender signatures. |
 | `SysHealthCLI clamav install` | Install ClamAV for this operating system (admin on Windows). |
+| `SysHealthCLI linux-tools install` | Linux: install helper tools for copying and disk health (xclip, smartmontools). |
 | `SysHealthCLI startup` | List startup apps and whether they are enabled. |
 | `SysHealthCLI autoruns --hide-microsoft` | Full autorun audit with signature status and risk flags. |
 | `SysHealthCLI connections --internet` | Programs currently connected to the internet. |

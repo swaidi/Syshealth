@@ -12,7 +12,7 @@ from core.checks import INFO, WARN
 from core.connections import end_process
 from core.monitor import Sampler
 from core.platform_utils import APP_NAME, NeedsAdmin, human_size, open_location
-from ui.common import MutedLabel, Table, card
+from ui.common import copy_to_clipboard, MutedLabel, Table, card
 
 
 # =============================================================================== recent changes
@@ -143,8 +143,7 @@ class ChangeDetails(tk.Toplevel):
             messagebox.showinfo(APP_NAME, f"This location no longer exists:\n{folder}", parent=self)
 
     def copy(self) -> None:
-        self.app.clipboard_clear()
-        self.app.clipboard_append("\n".join(self.change.items))
+        copy_to_clipboard(self.app, "\n".join(self.change.items))
         self.app.set_status(f"Copied {len(self.change.items):,} item(s) to the clipboard.")
 
 

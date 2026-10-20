@@ -1,11 +1,15 @@
 """Shared widgets and constants for SysHealth pages."""
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, ttk
 
 from core.checks import FAIL, INFO, OK, WARN
-from core.platform_utils import list_drives
+from core.platform_utils import list_drives, system_env
 from ui import theme
 
 UNCHECKED, CHECKED = "☐", "☑"
@@ -223,13 +227,101 @@ class ScrollFrame(ttk.Frame):
         self.sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+        _SCROLL_FRAMES[str(self.canvas)] = self  # scrolled by the app-wide wheel handler (install_input_helpers)
         app.on_theme(lambda p: self.canvas.configure(background=p["window"]))
 
-    def _wheel(self, event) -> None:
+    def scroll(self, steps: int) -> None:
         if self.inner.winfo_height() > self.canvas.winfo_height():
-            self.canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+            self.canvas.yview_scroll(steps, "units")
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# App-wide input helpers: mouse wheel and touchpad scrolling on every platform, Ctrl+A, reliable clipboard.
+_SCROLL_FRAMES: dict[str, "ScrollFrame"] = {}
+_NATIVE_SCROLL = {"Text", "Treeview", "Listbox", "TCombobox", "Scrollbar", "TScrollbar"}
+
+
+def _wheel_steps(event) -> int:
+    if getattr(event, "num", None) == 4:
+        return -2                       # Linux/X11: scroll up
+    if getattr(event, "num", None) == 5:
+        return 2                        # Linux/X11: scroll down
+    delta = getattr(event, "delta", 0) or 0
+    if not delta:
+        return 0
+    if abs(delta) >= 120:               # Windows: multiples of 120
+        return int(-delta / 120) * 2
+    return -1 if delta > 0 else 1       # macOS and Tk 9 touchpads: small deltas
+
+
+def _on_wheel(event, steps=None):
+    """Scroll the page under the pointer. Text boxes and lists scroll themselves, so they are left alone."""
+    try:
+        widget = event.widget.winfo_containing(event.x_root, event.y_root)
+    except (tk.TclError, AttributeError, KeyError):
+        return None
+    w = widget
+    while w is not None:
+        try:
+            cls = w.winfo_class()
+        except tk.TclError:
+            return None
+        if cls in _NATIVE_SCROLL:
+            return None
+        frame = _SCROLL_FRAMES.get(str(w))
+        if frame is not None:
+            steps = steps if steps is not None else _wheel_steps(event)
+            if steps:
+                frame.scroll(steps)
+            return "break"
+        w = w.master
+    return None
+
+
+def _select_all_text(event):
+    event.widget.tag_add("sel", "1.0", "end-1c")
+    event.widget.mark_set("insert", "end-1c")
+    return "break"
+
+
+def _select_all_entry(event):
+    event.widget.select_range(0, "end")
+    event.widget.icursor("end")
+    return "break"
+
+
+def install_input_helpers(root: tk.Misc) -> None:
+    """Call once on the main window."""
+    root.bind_all("<MouseWheel>", _on_wheel, add="+")                        # Windows, macOS, Tk 9
+    root.bind_all("<Button-4>", lambda e: _on_wheel(e, -2), add="+")        # Linux touchpad/wheel: up
+    root.bind_all("<Button-5>", lambda e: _on_wheel(e, 2), add="+")         # Linux touchpad/wheel: down
+    for seq in ("<Control-a>", "<Control-A>"):
+        root.bind_class("Text", seq, _select_all_text)
+        for cls in ("Entry", "TEntry", "TCombobox"):
+            root.bind_class(cls, seq, _select_all_entry)
+
+
+def copy_to_clipboard(root: tk.Misc, text: str) -> None:
+    """Copy text so other programs can paste it, even after SysHealth closes. On Linux the system clipboard
+    tool is used when available (Tk's own clipboard only lasts while the app runs and is unreliable on some
+    desktops); Tk's clipboard is always set as well."""
+    root.clipboard_clear()
+    root.clipboard_append(text)
+    root.update_idletasks()
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return
+    tools = []
+    if os.environ.get("WAYLAND_DISPLAY"):
+        tools.append(["wl-copy"])
+    tools += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for cmd in tools:
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode("utf-8"), env=system_env(), timeout=5,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except (OSError, subprocess.SubprocessError):
+                continue
 
 
 def bar(fraction: float, width: int = 20) -> str:

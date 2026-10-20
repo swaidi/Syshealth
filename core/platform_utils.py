@@ -237,7 +237,7 @@ def run_cmd(cmd: list[str], timeout: Optional[float] = 120, stdin_text: Optional
         cp = subprocess.run(cmd, input=stdin_text.encode() if stdin_text else None,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=None if stdin_text else subprocess.DEVNULL,
-                            timeout=timeout, creationflags=CREATE_NO_WINDOW)
+                            timeout=timeout, creationflags=CREATE_NO_WINDOW, env=system_env())
     except FileNotFoundError:
         return 127, f"Command not found: {cmd[0]}"
     except subprocess.TimeoutExpired:
@@ -251,7 +251,7 @@ def run_stream(cmd: list[str], on_line: LogFn = None, cancel: Optional[threading
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
-                                creationflags=CREATE_NO_WINDOW)
+                                creationflags=CREATE_NO_WINDOW, env=system_env())
     except FileNotFoundError:
         raise RuntimeError(f"Command not found: {cmd[0]}")
     if stdin_text:
@@ -321,6 +321,32 @@ def _unwrap_ps(obj):
     return obj
 
 
+def system_env() -> dict:
+    """Environment for starting other programs (file manager, browser, mail app).
+    The packaged Linux build points LD_LIBRARY_PATH and similar settings at its own bundled libraries;
+    passing those on breaks other programs, so restore the values the system had before SysHealth started."""
+    env = dict(os.environ)
+    if IS_WINDOWS or not getattr(sys, "frozen", False):
+        return env
+    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "PYTHONHOME", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+        original = env.pop(var + "_ORIG", None)
+        if original is not None:
+            env[var] = original
+        else:
+            env.pop(var, None)
+    for var in ("TCL_LIBRARY", "TK_LIBRARY", "GDK_PIXBUF_MODULE_FILE", "GIO_MODULE_DIR"):
+        env.pop(var, None)
+    return {k: v for k, v in env.items() if not k.startswith(("_PYI", "_MEIPASS"))}
+
+
+def _xdg_open(target: str) -> None:
+    opener = shutil.which("xdg-open")
+    if not opener:
+        raise OSError("No program is set up to open links and files (xdg-open is missing).")
+    subprocess.Popen([opener, target], env=system_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
 def open_location(path: str) -> None:
     """Show a file in the system file manager."""
     if IS_WINDOWS:
@@ -329,14 +355,22 @@ def open_location(path: str) -> None:
         else:
             os.startfile(path if os.path.isdir(path) else os.path.dirname(path))  # type: ignore[attr-defined]
     else:
-        target = path if os.path.isdir(path) else os.path.dirname(path)
-        opener = shutil.which("xdg-open") or "xdg-open"
-        subprocess.Popen([opener, target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _xdg_open(path if os.path.isdir(path) else os.path.dirname(path))
 
 
 def open_url_or_file(target: str) -> None:
+    """Open a web link, file or app link with the system's default program."""
     if IS_WINDOWS:
         os.startfile(target)  # type: ignore[attr-defined]
     else:
-        subprocess.Popen([shutil.which("xdg-open") or "xdg-open", target],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _xdg_open(target)
+
+
+def mail_app_available() -> bool:
+    """Whether an email program is registered for mailto: links (Linux; Windows reports it when opening)."""
+    if IS_WINDOWS:
+        return True
+    if not shutil.which("xdg-mime"):
+        return False
+    rc, out = run_cmd(["xdg-mime", "query", "default", "x-scheme-handler/mailto"], timeout=10)
+    return rc == 0 and out.strip().endswith(".desktop")

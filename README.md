@@ -68,6 +68,8 @@ This covers SysHealth itself only; other installed apps are handled on the App U
 
 ## Feedback and problem reports
 
+The report window shows the address to send to, with **Copy report** and **Copy address** buttons. **Send by email** appears only when an email program is set up. On Linux, copying uses the system clipboard tool when available (`xclip`, `xsel` or `wl-copy`), so the text stays available after SysHealth closes.
+
 The **Feedback** button in the header opens a report form. When any task fails, the error message also offers to report the problem, and the form is filled in with the error, system details and recent activity. You can review and edit the report, then send it by email (to dev.oasis006@passmail.net), copy it, or save it as a file. To change the address, edit `FEEDBACK_EMAIL` in `ui/feedback.py`.
 
 ## Safety design
@@ -119,6 +121,8 @@ Every feature publishes its latest result to `state.json`, and SysHealth's own a
    Output: `dist\SysHealth.exe` and `dist\SysHealthCLI.exe`.
 
 Linux: `sudo apt install python3-tk python3-venv smartmontools`, then `./build_linux.sh`.
+
+On first start on Linux, SysHealth offers to install small helper tools it needs (xclip or wl-clipboard for reliable copying, smartmontools for disk health) with one password prompt. Later: `SysHealthCLI linux-tools install`.
 
 ## Command line
 

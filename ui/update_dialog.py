@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
-import webbrowser
 from tkinter import messagebox, ttk
 
 from core import self_update, settings, state
+from core.platform_utils import open_url_or_file
 from core.version import VERSION
 
 
@@ -59,7 +59,7 @@ class UpdateDialog(tk.Toplevel):
             notes.insert(tk.END, ("\n" if i else "") + line, ("head",) if heading else ())
         notes.configure(state=tk.DISABLED)
 
-        ttk.Button(body, text="View full release notes", command=lambda: webbrowser.open(release.page)).pack(
+        ttk.Button(body, text="View full release notes", command=lambda: open_url_or_file(release.page)).pack(
             anchor=tk.W, pady=(8, 0))
         note = ("Updating downloads the new version, checks it, then closes and reopens SysHealth. "
                 "Your settings, quarantine and history are kept." if self.self_install else
@@ -90,7 +90,7 @@ class UpdateDialog(tk.Toplevel):
 
     def update(self) -> None:
         if not self.self_install:
-            webbrowser.open(self.release.page)
+            open_url_or_file(self.release.page)
             self.destroy()
             return
         if self.app.busy:
@@ -111,7 +111,7 @@ class UpdateDialog(tk.Toplevel):
                 app.log(f"Update not installed: {result}")
                 if messagebox.askyesno("SysHealth update", f"The update could not be installed.\n\n{result}\n\n"
                                        "Open the release page to download it manually?", icon="warning"):
-                    webbrowser.open(release.page)
+                    open_url_or_file(release.page)
                 return
             if not messagebox.askokcancel("SysHealth update", f"Version {release.version} is downloaded and ready.\n\n"
                                           "SysHealth will now close, install it and reopen. This takes a few seconds."):
@@ -124,7 +124,7 @@ class UpdateDialog(tk.Toplevel):
                 if messagebox.askyesno("SysHealth update", f"SysHealth could not install the update.\n\n{exc}\n\n"
                                        "Nothing was changed. Open the release page to download it manually?",
                                        icon="warning"):
-                    webbrowser.open(release.page)
+                    open_url_or_file(release.page)
                 return
             state.record_action("SysHealth update", f"Installing version {release.version}",
                                 f"from {VERSION}; files {method}")

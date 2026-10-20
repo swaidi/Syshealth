@@ -14,7 +14,7 @@ from core.checks import FAIL, WARN, execute_fix
 from core.disk_usage import analyze as analyze_space
 from core.duplicates import find_duplicates, index_files
 from core.malware import Allowlist, ClamAV, Defender, quick_scan_locations, scan_unknown_files
-from core.platform_utils import IS_WINDOWS, Cancelled, NeedsAdmin, human_size
+from core.platform_utils import IS_LINUX, IS_WINDOWS, Cancelled, NeedsAdmin, human_size
 from core.quarantine import Quarantine
 
 EXIT_OK, EXIT_FOUND, EXIT_ADMIN = 0, 1, 2
@@ -198,12 +198,37 @@ def cmd_malware(args) -> int:
 
 def cmd_signatures(args) -> int:
     clam, defender = ClamAV(), Defender()
+    failed = []
     if clam.installed():
-        clam.update(Out.log, CANCEL)
+        if clam.update(Out.log, CANCEL) not in (0, 1):
+            failed.append("ClamAV")
+        Out.log(f"ClamAV: {clam.db_status()}")
     else:
         Out.log("ClamAV is not installed (run: clamav install).")
     if IS_WINDOWS and defender.installed():
-        defender.update(Out.log, CANCEL)
+        if defender.update(Out.log, CANCEL) not in (0, None):
+            failed.append("Microsoft Defender")
+    if failed:
+        print(f"Signature update failed for: {', '.join(failed)}", file=sys.stderr)
+        state.record_action("Malware", "Signature update failed", ", ".join(failed))
+        return EXIT_FOUND
+    state.record_action("Malware", "Updated malware signatures", f"ClamAV: {clam.db_status()}")
+    return EXIT_OK
+
+
+def cmd_linux_tools(args) -> int:
+    from core import linux_tools
+    if not IS_LINUX:
+        Out.log("Helper tools are only needed on Linux.")
+        return EXIT_OK
+    needed = linux_tools.missing()
+    if args.action == "check" or not needed:
+        emit([t.__dict__ for t in needed], [[t.package, t.purpose] for t in needed], ["Missing package", "Used for"],
+             "All helper tools are installed." if not needed else "Missing helper tools:")
+        return EXIT_FOUND if needed and args.action == "check" else EXIT_OK
+    linux_tools.install(needed, Out.log, CANCEL)
+    state.record_action("System", "Installed helper tools", ", ".join(t.package for t in needed))
+    Out.log("Helper tools installed.")
     return EXIT_OK
 
 
@@ -511,6 +536,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--engines", help="comma list: clamav,defender,unknown")
     sp = add("signatures", cmd_signatures, "update antivirus signatures")
     sp.add_argument("action", choices=["update"])
+    sp = add("linux-tools", cmd_linux_tools, "Linux: check or install helper tools (clipboard, disk health)")
+    sp.add_argument("action", choices=["check", "install"])
     sp = add("clamav", cmd_clamav, "install ClamAV")
     sp.add_argument("action", choices=["install"])
     sp = add("cleanup", cmd_cleanup, "temp files, caches, old downloads, empty folders")

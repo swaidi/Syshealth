@@ -17,7 +17,7 @@ from core.checks import FAIL, INFO, OK, WARN, Fix, execute_fix
 from core import long_paths
 from core.duplicates import export_xlsx as export_duplicates_xlsx, find_duplicates, in_program_folder, index_files
 from core.malware import Allowlist, ClamAV, Defender, quick_scan_locations, scan_unknown_files
-from core.platform_utils import (APP_NAME, IS_WINDOWS, Cancelled, NeedsAdmin, app_data_dir, human_size,
+from core.platform_utils import (APP_NAME, IS_LINUX, IS_WINDOWS, Cancelled, NeedsAdmin, app_data_dir, human_size,
                                  is_admin, is_protected, open_location, open_url_or_file,
                                  relaunch_as_admin)
 from core import security, self_update, state, settings as settings_store
@@ -71,6 +71,8 @@ class App(tk.Tk):
         self.last_error: dict | None = None
         self.font_family = theme.font_family()
 
+        from ui.common import install_input_helpers
+        install_input_helpers(self)
         self._build_header()
         self._build_statusbar()
         self._build_body()
@@ -78,7 +80,7 @@ class App(tk.Tk):
         self.show_page("dashboard")
         self.after(100, self._drain_queue)
         self.after(5000, self._watch_system_theme)
-        self.after(1500, self._offer_clamav)
+        self.after(1500, self._offer_linux_tools if IS_LINUX else self._offer_clamav)
         self.log(f"{APP_NAME} {VERSION} started. Administrator rights: {'yes' if is_admin() else 'no'}.")
         self._report_finished_update()
         self.after(4000, self._startup_update_check)
@@ -470,6 +472,28 @@ class App(tk.Tk):
             if on_done:
                 on_done()
         self.run_task(fix.title, lambda c: execute_fix(fix, self.log, c), done)
+
+    def _offer_linux_tools(self) -> None:
+        """First start on Linux: offer the small helper tools once (one password prompt), then ClamAV."""
+        from core import linux_tools
+        needed = linux_tools.missing()
+        if not needed or self.settings.get("linux_tools_prompted"):
+            self._offer_clamav()
+            return
+        settings_store.set_value("linux_tools_prompted", True)
+        lines = "\n".join(f"•  {t.package}: {t.purpose}" for t in needed)
+        if not messagebox.askyesno(APP_NAME, "SysHealth works best with these small system tools, which are not "
+                                   f"installed yet:\n\n{lines}\n\nInstall them now? You will be asked for your "
+                                   "password once.\n\nYou can also install them later from a terminal:\n"
+                                   "SysHealthCLI linux-tools install"):
+            self._offer_clamav()
+            return
+
+        def done(_r):
+            state.record_action("System", "Installed helper tools", ", ".join(t.package for t in needed))
+            self.log("Helper tools installed.")
+            self._offer_clamav()
+        self.run_task("Installing helper tools", lambda c: linux_tools.install(needed, self.log, c), done)
 
     def _offer_clamav(self) -> None:
         """First launch: offer to install ClamAV once. Skipped when it is already installed."""
@@ -1355,24 +1379,36 @@ class MalwareTab(ttk.Frame):
 
     def update_signatures(self) -> None:
         def work(cancel):
+            failed = []
             if self.clam.installed():
                 self.app.log("Updating ClamAV signatures from database.clamav.net…")
-                self.clam.update(self.app.log, cancel)
+                rc = self.clam.update(self.app.log, cancel)
+                if rc not in (0, 1):  # freshclam: 0 = updated, 1 = already up to date
+                    failed.append(f"ClamAV (freshclam exit code {rc})")
             else:
                 self.app.log("ClamAV is not installed; skipping.")
             if IS_WINDOWS and self.defender.installed():
                 self.app.log("Updating Microsoft Defender signatures…")
-                self.defender.update(self.app.log, cancel)
-            return (self.clam.db_status() if self.clam.installed() else "ClamAV not installed",
+                rc = self.defender.update(self.app.log, cancel)
+                if rc not in (0, None):
+                    failed.append(f"Microsoft Defender (exit code {rc})")
+            return (failed, self.clam.db_status() if self.clam.installed() else "ClamAV not installed",
                     self.defender.status() if IS_WINDOWS and self.defender.installed() else "")
 
         def done(result):
             from ui import reminders
-            clam, defender = result
-            state.record_action("Malware", "Updated malware signatures",
-                                f"ClamAV: {clam}" + (f"; Defender: {defender}" if defender else ""))
-            reminders.clear()
+            failed, clam, defender = result
+            summary = f"ClamAV: {clam}" + (f"; Defender: {defender}" if defender else "")
             self.refresh_status()
+            if failed:
+                state.record_action("Malware", "Signature update failed", "; ".join(failed) + ". " + summary)
+                self.app.set_status("Signature update: failed")
+                messagebox.showwarning(APP_NAME, "The signature update did not complete for:\n\n" +
+                                       "\n".join(failed) + "\n\nThe activity log shows the reason. Check the "
+                                       "internet connection and try again.")
+                return
+            state.record_action("Malware", "Updated malware signatures", summary)
+            reminders.clear()
         self.app.run_task("Signature update", work, done)
 
     # ------------------------------------------------------------------ scanning

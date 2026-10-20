@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from core import app_updates, cheatsheet, settings, shredder, state, virustotal
 from core.checks import OK, WARN
 from core.platform_utils import APP_NAME, IS_WINDOWS, human_size, open_url_or_file
-from ui.common import MutedLabel, CheckTree, Table, card
+from ui.common import copy_to_clipboard, MutedLabel, CheckTree, Table, card
 
 
 # =============================================================================== app updates
@@ -290,8 +290,7 @@ class CommandLinePage(ttk.Frame):
         if not sel:
             messagebox.showinfo(APP_NAME, "Select a command first.")
             return
-        self.app.clipboard_clear()
-        self.app.clipboard_append(sel[0])
+        copy_to_clipboard(self.app, sel[0])
         self.app.set_status(f"Copied: {sel[0]}")
 
     def save(self) -> None:

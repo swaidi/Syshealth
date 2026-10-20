@@ -41,6 +41,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
         ("{cmd} malware D:\\Projects", "Scan a folder with ClamAV, Defender and the unknown-programs check."),
         ("{cmd} signatures update", "Update ClamAV and Defender signatures."),
         ("{cmd} clamav install", "Install ClamAV for this operating system (admin on Windows)."),
+        ("{cmd} linux-tools install", "Linux: install helper tools for copying and disk health (xclip, smartmontools)."),
         ("{cmd} startup", "List startup apps and whether they are enabled."),
         ("{cmd} autoruns --hide-microsoft", "Full autorun audit with signature status and risk flags."),
         ("{cmd} connections --internet", "Programs currently connected to the internet."),
