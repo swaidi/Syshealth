@@ -132,7 +132,7 @@ def cmd_duplicates(args) -> int:
     mode = "name" if args.by == "name" else "size_ext"
     files = index_files(args.paths, max(1, args.min_kb * 1024), cancel=CANCEL, progress=Out.quiet,
                         include_program=args.include_program)
-    groups = find_duplicates(files, mode, not args.no_verify, CANCEL, Out.quiet)
+    groups = find_duplicates(files, mode, not args.no_verify, CANCEL, Out.quiet, args.include_program)
     if args.export:
         from core.duplicates import export_xlsx
         rows = export_xlsx(groups, args.export, args.paths, mode, not args.no_verify)
@@ -145,8 +145,10 @@ def cmd_duplicates(args) -> int:
     else:
         for i, g in enumerate(groups, 1):
             print(f"\nGroup {i}: {g.label} — {len(g.files)} files, reclaim {human_size(g.wasted)}")
+            keep = g.keep
             for f in g.files:
-                print(f"   {human_size(f.size):>9}  {f.path}")
+                mark = f"protected: {g.locked[f.path]}" if f.path in g.locked else ("keep" if f is keep else "")
+                print(f"   {human_size(f.size):>9}  {f.path}" + (f"   [{mark}]" if mark else ""))
         print(f"\n{len(groups)} groups, {human_size(wasted)} reclaimable.")
     return EXIT_FOUND if groups else EXIT_OK
 

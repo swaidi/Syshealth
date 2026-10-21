@@ -66,6 +66,7 @@ class CheckTree(ttk.Frame):
         self.tree.tag_configure("group", background=p.get("border", p["group"]),
                                 font=(_CURRENT["family"], 10, "bold"))
         self.tree.tag_configure("threat", foreground=p["fail"])
+        self.tree.tag_configure("locked", foreground=p["muted"])
 
     def clear(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -80,6 +81,10 @@ class CheckTree(ttk.Frame):
         iid = self.tree.insert(parent, tk.END, text=f"{UNCHECKED} {label}", values=values, tags=odd)
         self.labels[iid] = label
         return iid
+
+    def add_locked_item(self, parent: str, label: str, values) -> str:
+        """A row that cannot be selected (shown without a checkbox)."""
+        return self.tree.insert(parent, tk.END, text=f"🔒 {label}", values=values, tags=("locked",))
 
     def set_checked(self, iid: str, state: bool) -> None:
         if iid not in self.labels:

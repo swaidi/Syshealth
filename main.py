@@ -15,7 +15,8 @@ from send2trash import send2trash
 from core import disk_health, network, system_health
 from core.checks import FAIL, INFO, OK, WARN, Fix, execute_fix
 from core import long_paths
-from core.duplicates import export_xlsx as export_duplicates_xlsx, find_duplicates, in_program_folder, index_files
+from core.duplicates import export_xlsx as export_duplicates_xlsx, choose_keep, find_duplicates, in_program_folder, \
+    index_files
 from core.malware import Allowlist, ClamAV, Defender, quick_scan_locations, scan_unknown_files
 from core.platform_utils import (APP_NAME, IS_LINUX, IS_WINDOWS, Cancelled, NeedsAdmin, app_data_dir, human_size,
                                  is_admin, is_protected, open_location, open_url_or_file,
@@ -788,6 +789,7 @@ class DuplicatesTab(ttk.Frame):
         self.app = app
         self.files: dict[str, object] = {}
         self.group_of: dict[str, str] = {}
+        self.locked: dict[str, str] = {}   # row -> why that copy cannot be selected
         app.page_header(self, "Duplicate Files", "Find copies by name or by size within the same file type. "
                         "System folders and app data (browser profiles, passwords, settings) are always excluded.")
 
@@ -840,7 +842,7 @@ class DuplicatesTab(ttk.Frame):
 
         btns = ttk.Frame(self)
         btns.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 4), before=self.tree)
-        ttk.Button(btns, text="Select all but newest", command=lambda: self.auto_select(True)).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Select all but best copy", command=lambda: self.auto_select(True)).pack(side=tk.LEFT)
         ttk.Button(btns, text="Select all but oldest", command=lambda: self.auto_select(False)).pack(
             side=tk.LEFT, padx=6)
         ttk.Button(btns, text="Clear selection", command=self.clear_selection).pack(side=tk.LEFT)
@@ -871,7 +873,7 @@ class DuplicatesTab(ttk.Frame):
 
         def work(cancel):
             files = index_files(roots, max(min_size, 1), hidden, appdata, cancel, progress, program)
-            return find_duplicates(files, mode, verify, cancel, progress)
+            return find_duplicates(files, mode, verify, cancel, progress, show_locked=program)
 
         self.tree.clear()
         self.app.run_task("Duplicate scan", work, self.show_results)
@@ -880,14 +882,19 @@ class DuplicatesTab(ttk.Frame):
         self.tree.clear()
         self.files.clear()
         self.group_of.clear()
+        self.locked = {}
         self.groups = groups
         for i, g in enumerate(groups[:self.MAX_GROUPS], 1):
             gid = self.tree.add_group(f"Group {i}: {g.label} — {len(g.files)} files",
                                       (human_size(g.total), "", f"Reclaimable: {human_size(g.wasted)}"))
             for f in g.files:
-                iid = self.tree.add_item(gid, f.name, (human_size(f.size),
-                                                      dt.datetime.fromtimestamp(f.mtime).strftime("%Y-%m-%d %H:%M"),
-                                                      os.path.dirname(f.path)))
+                values = (human_size(f.size), dt.datetime.fromtimestamp(f.mtime).strftime("%Y-%m-%d %H:%M"),
+                          os.path.dirname(f.path))
+                if f.path in g.locked:
+                    iid = self.tree.add_locked_item(gid, f"{f.name}  (protected: {g.locked[f.path]})", values)
+                    self.locked[iid] = g.locked[f.path]
+                else:
+                    iid = self.tree.add_item(gid, f.name, values)
                 self.files[iid] = f
                 self.group_of[iid] = gid
         wasted = sum(g.wasted for g in groups)
@@ -904,13 +911,15 @@ class DuplicatesTab(ttk.Frame):
 
     def auto_select(self, keep_newest: bool) -> None:
         for gid in self.tree.tree.get_children():
-            kids = list(self.tree.tree.get_children(gid))
+            kids = [k for k in self.tree.tree.get_children(gid) if k in self.files]
             if len(kids) < 2:
                 continue
-            keep = max(kids, key=lambda k: self.files[k].mtime) if keep_newest else \
-                min(kids, key=lambda k: self.files[k].mtime)
+            locked = {self.files[k].path: r for k, r in self.locked.items() if k in kids}
+            keep = choose_keep([self.files[k] for k in kids], locked, newest=keep_newest)
             for k in kids:
-                self.tree.set_checked(k, k != keep and not is_protected(self.files[k].path))
+                f = self.files[k]
+                self.tree.set_checked(k, keep is not None and f is not keep and f.path not in locked
+                                      and not is_protected(f.path))
         self.update_selection_label()
 
     def clear_selection(self) -> None:
@@ -962,8 +971,18 @@ class DuplicatesTab(ttk.Frame):
         if not targets:
             messagebox.showinfo(APP_NAME, "Select files first (click the box next to each file).")
             return
+        locked = [i for i in targets if i in self.locked or in_program_folder(self.files[i].path)
+                   and not self.program.get()]
+        if locked:
+            messagebox.showwarning(APP_NAME, f"{len(locked)} selected files are system, snapshot, program or project "
+                                   "files and were deselected.")
+            for i in locked:
+                self.tree.set_checked(i, False)
+            targets = [i for i in targets if i not in locked]
+            if not targets:
+                return
         for gid in {self.group_of[i] for i in targets}:
-            kids = set(self.tree.tree.get_children(gid))
+            kids = {k for k in self.tree.tree.get_children(gid) if k not in self.locked}
             if kids and kids <= set(targets):
                 messagebox.showwarning(APP_NAME, "Every copy in at least one group is selected. Keep at least one "
                                        "copy in each group.")
