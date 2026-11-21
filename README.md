@@ -140,3 +140,12 @@ See `CHEATSHEET.md`, the Command Line page, or run `SysHealthCLI cheatsheet`. Ev
 - Shredding cannot guarantee destruction on SSDs, flash drives or cloud-synced folders; use full-disk encryption.
 - The speed test uses Cloudflare's public speed endpoints; results vary with server load and Wi-Fi conditions.
 - VirusTotal free keys allow 4 lookups per minute and 500 per day.
+
+## License
+
+Copyright © 2026 Swaidi (trading as A.T.Grep).
+
+Free for **individuals** for personal, non-commercial use. Use by any **organization** (company,
+small business, government body, charity or school), commercial use, distributing changed versions
+and reusing the code need written approval and may involve fees. See [LICENSE.md](LICENSE.md).
+To ask, open an [issue](https://github.com/swaidi/Syshealth/issues) or email dev.oasis006@passmail.net.
